@@ -4,8 +4,20 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
+slint-studio-core.workspace = true
+
+image.workspace = true
+slint.workspace = true
+slint-interpreter.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+image = { workspace = true, features = ["png"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true
