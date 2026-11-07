@@ -6,6 +6,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::text::LineCol;
+
 /// Severity of a diagnostic, ordered from least to most severe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Severity {
@@ -45,19 +47,39 @@ impl DiagnosticSource {
     }
 }
 
-/// A position in a source file, **1-based** as displayed to the user.
+/// A range in a source file.
 ///
-/// Conversions from 0-based protocol positions (e.g. LSP) happen at the edges.
+/// Lines and columns are **0-based** and columns count characters
+/// ([`PositionEncoding::Chars`](crate::text::PositionEncoding::Chars));
+/// producers convert from their own encoding (e.g. LSP UTF-8/UTF-16) when
+/// creating it. `Display` shows the 1-based start, as users expect.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Location {
     pub path: PathBuf,
-    pub line: u32,
-    pub column: u32,
+    pub start: LineCol,
+    pub end: LineCol,
+}
+
+impl Location {
+    /// A zero-length location at `position`.
+    pub fn at(path: impl Into<PathBuf>, position: LineCol) -> Self {
+        Self {
+            path: path.into(),
+            start: position,
+            end: position,
+        }
+    }
 }
 
 impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.path.display(), self.line, self.column)
+        write!(
+            f,
+            "{}:{}:{}",
+            self.path.display(),
+            self.start.line + 1,
+            self.start.column + 1
+        )
     }
 }
 
@@ -148,12 +170,8 @@ mod tests {
     }
 
     #[test]
-    fn location_displays_as_path_line_column() {
-        let location = Location {
-            path: PathBuf::from("ui/main.slint"),
-            line: 12,
-            column: 5,
-        };
+    fn location_displays_one_based_path_line_column() {
+        let location = Location::at("ui/main.slint", LineCol::new(11, 4));
         assert_eq!(location.to_string(), "ui/main.slint:12:5");
     }
 }

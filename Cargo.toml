@@ -24,6 +24,24 @@ egui-phosphor = "0.14.0"
 egui_kittest = "0.36.2"
 fontdb = "0.23"
 
+# Language server client and slint-lsp provisioning
+lsp-types = "0.97"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2.5"
+ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+sha2 = "0.11"
+directories = "6"
+
+# Native dialogs
+rfd = "0.18"
+
+# Testing
+tempfile = "3"
+
 # Errors & diagnostics
 anyhow = "1"
 thiserror = "2"
