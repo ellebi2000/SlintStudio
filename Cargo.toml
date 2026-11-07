@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/slint-studio-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+slint-studio-core = { path = "crates/slint-studio-core" }
+slint-studio-lsp = { path = "crates/slint-studio-lsp" }
+slint-studio-preview = { path = "crates/slint-studio-preview" }
+slint-studio-compiler = { path = "crates/slint-studio-compiler" }
+
+# GUI shell. Pinned to egui 0.36: egui_dock and egui-phosphor do not support 0.37 yet.
+eframe = "0.36.2"
+egui = "0.36.2"
+egui_dock = "0.21.1"
+egui-phosphor = "0.14.0"
+egui_kittest = "0.36.2"
+fontdb = "0.23"
+
+# Errors & diagnostics
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+egui_extras = "0.36.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# Production code must not panic on recoverable errors (see clippy.toml for tests).
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "warn"
+todo = "warn"
+
+# Keep debug builds of the UI responsive: optimise dependencies, not our crates.
+[profile.dev.package."*"]
+opt-level = 2
