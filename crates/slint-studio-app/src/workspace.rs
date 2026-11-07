@@ -290,10 +290,13 @@ impl DiagnosticStore {
                 continue;
             };
             for diagnostic in diagnostics {
+                // Producers agree on where a problem starts, not always on
+                // where it ends (cargo's text output has no end).
+                let start = |d: &Diagnostic| d.location.as_ref().map(|l| (l.path.clone(), l.start));
                 let duplicate = merged.iter().any(|d| {
                     d.severity == diagnostic.severity
                         && d.message == diagnostic.message
-                        && d.location == diagnostic.location
+                        && start(d) == start(diagnostic)
                 });
                 if !duplicate {
                     merged.push(diagnostic.clone());
@@ -459,11 +462,13 @@ mod tests {
                 Some("/p/a.slint"),
             )],
         );
-        // The compiler reports the same error, another one and a global one.
-        store.add(
-            DiagnosticSource::Compiler,
-            diagnostic(DiagnosticSource::Compiler, "same", Some("/p/a.slint")),
-        );
+        // The compiler reports the same error (without an end), another one
+        // and a global one.
+        let mut same = diagnostic(DiagnosticSource::Compiler, "same", Some("/p/a.slint"));
+        if let Some(location) = &mut same.location {
+            location.end = LineCol::new(0, 5);
+        }
+        store.add(DiagnosticSource::Compiler, same);
         store.add(
             DiagnosticSource::Compiler,
             diagnostic(

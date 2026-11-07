@@ -289,15 +289,17 @@ fn runner_status(ui: &mut Ui, status: &RunnerStatus, command: Option<&str>, pale
     match status {
         RunnerStatus::Idle => {}
         RunnerStatus::Working { .. } => {
+            // Right to left: the command takes whatever width is left.
+            ui.label(RichText::new(label).color(palette.accent_secondary));
+            ui.add(egui::Spinner::new().size(14.0));
             if let Some(command) = command {
                 ui.add(
                     Label::new(RichText::new(command).monospace().weak())
                         .truncate()
                         .selectable(false),
-                );
+                )
+                .on_hover_text(command);
             }
-            ui.label(RichText::new(label).color(palette.accent_secondary));
-            ui.add(egui::Spinner::new().size(14.0));
         }
         RunnerStatus::Finished { outcome, .. } => {
             let (glyph, color) = match outcome {

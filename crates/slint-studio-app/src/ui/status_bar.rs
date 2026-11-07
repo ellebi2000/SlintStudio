@@ -11,6 +11,7 @@ use crate::app::AppState;
 use crate::commands::Command;
 use crate::layout::Tab;
 use crate::runner::RunnerStatus;
+use slint_studio_compiler::JobOutcome;
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     ui.visuals_mut().override_text_color = Some(state.palette.on_accent);
@@ -39,12 +40,14 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         let status = &state.runner.status;
         if *status != RunnerStatus::Idle {
             ui.add_space(12.0);
-            let glyph = if status.is_working() {
-                icon::HOURGLASS_MEDIUM
-            } else if status.is_failure() {
-                icon::X_CIRCLE
-            } else {
-                icon::CHECK_CIRCLE
+            let glyph = match status {
+                _ if status.is_working() => icon::HOURGLASS_MEDIUM,
+                _ if status.is_failure() => icon::X_CIRCLE,
+                RunnerStatus::Finished {
+                    outcome: JobOutcome::Stopped,
+                    ..
+                } => icon::STOP_CIRCLE,
+                _ => icon::CHECK_CIRCLE,
             };
             let mut label = RichText::new(status.label());
             if status.is_failure() {

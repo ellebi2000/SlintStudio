@@ -249,7 +249,9 @@ impl StderrScanner {
         ]
         .into_iter()
         .find_map(|(prefix, severity)| {
-            text.strip_prefix(prefix)
+            // Cargo indents the stderr of a failed build script by two spaces.
+            text.trim_start()
+                .strip_prefix(prefix)
                 .map(|message| (severity, message.trim().to_owned()))
         })
         .or_else(|| {
@@ -439,14 +441,20 @@ mod tests {
         let mut scanner = StderrScanner::new("/w/app");
         let lines = [
             "\u{1b}[1m\u{1b}[92m   Compiling\u{1b}[0m app v0.1.0 (/w/app)",
-            "error: failed to run custom build command for `app v0.1.0 (/w/app)`",
+            // As printed by cargo for a failing `slint_build::compile`.
+            "\u{1b}[1m\u{1b}[91merror\u{1b}[0m: failed to run custom build command for `app v0.1.0 (/w/app)`",
+            "note: To improve backtraces for build dependencies, set the CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true environment variable to enable debug information generation.",
             "",
             "Caused by:",
-            "--- stderr",
-            "\u{1b}[1m\u{1b}[91merror\u{1b}[0m: Unknown element 'Buton'",
-            " \u{1b}[1m\u{1b}[94m-->\u{1b}[0m /w/app/ui/app-window.slint:12:9",
-            "   |",
-            "12 |         Buton { }",
+            "  process didn't exit successfully: `/w/app/target/debug/build/app-1/build-script-build` (exit status: 101)",
+            "  --- stderr",
+            "  \u{1b}[1m\u{1b}[91merror\u{1b}[0m\u{1b}[1m: Unknown element 'Buton'\u{1b}[0m",
+            "    \u{1b}[1m\u{1b}[94m--> \u{1b}[0m/w/app/ui/app-window.slint:12:9",
+            "     \u{1b}[1m\u{1b}[94m|\u{1b}[0m",
+            "  \u{1b}[1m\u{1b}[94m12\u{1b}[0m \u{1b}[1m\u{1b}[94m|\u{1b}[0m         Buton {",
+            "",
+            "  thread 'main' (21406) panicked at build.rs:2:49:",
+            "  compilazione Slint non riuscita: CompileError([\"/w/app/ui/app-window.slint:12: Unknown element 'Buton'\"])",
             "warning: app@0.1.0: Unused property 'x'",
             "warning: app@0.1.0:  --> ui/card.slint:3:5",
             "warning: app@0.1.0:   |",

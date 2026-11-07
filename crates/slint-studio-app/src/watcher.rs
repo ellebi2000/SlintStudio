@@ -96,6 +96,8 @@ impl FileWatcher {
                 Err(err) => debug!("evento di file non valido: {err}"),
             }
         }
+        // Temporary files written and renamed away in the meantime.
+        changes.modified.retain(|path| path.exists());
         changes
     }
 }
@@ -120,9 +122,16 @@ fn is_hidden(path: &Path) -> bool {
 fn classify(event: &notify::Event, changes: &mut FileChanges) {
     for path in event.paths.iter().filter(|p| !is_hidden(p)) {
         match event.kind {
-            EventKind::Create(_)
-            | EventKind::Remove(_)
-            | EventKind::Modify(ModifyKind::Name(_)) => {
+            EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => {
+                changes.structure.insert(path.clone());
+                // Editors, formatters and `git` often save by writing a
+                // temporary file and renaming it over the original: the
+                // file at `path` has new content.
+                if path.is_file() {
+                    changes.modified.insert(path.clone());
+                }
+            }
+            EventKind::Remove(_) => {
                 changes.structure.insert(path.clone());
             }
             EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any | ModifyKind::Other)
@@ -210,5 +219,31 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(seen.modified.contains(&canonical), "{seen:?}");
+    }
+
+    #[test]
+    fn files_replaced_by_rename_count_as_modified() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("main.slint");
+        std::fs::write(&file, "A {}").unwrap();
+        let tree = slint_studio_core::project::scan(&root).unwrap();
+        let watcher = FileWatcher::new(&tree.root, Arc::new(|| {})).unwrap();
+
+        // What `sed -i` and many editors do.
+        let temporary = root.join("main.slint.tmp");
+        std::fs::write(&temporary, "B {}").unwrap();
+        std::fs::rename(&temporary, &file).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = FileChanges::default();
+        while !seen.modified.contains(&file) && Instant::now() < deadline {
+            let changes = watcher.poll();
+            seen.modified.extend(changes.modified);
+            seen.structure.extend(changes.structure);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(seen.modified.contains(&file), "{seen:?}");
+        assert!(!seen.modified.contains(&temporary), "gone: {seen:?}");
     }
 }
