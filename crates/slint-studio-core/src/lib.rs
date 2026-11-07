@@ -6,9 +6,12 @@
 
 pub mod diagnostics;
 pub mod document;
+pub mod edit;
 pub mod log;
+pub mod outline;
 pub mod palette;
 pub mod project;
+pub mod properties;
 pub mod recent;
 pub mod syntax;
 pub mod text;
@@ -17,6 +20,7 @@ pub mod view_mode;
 pub use diagnostics::{Diagnostic, DiagnosticCounts, DiagnosticSource, Location, Severity};
 pub use document::{Document, Language, OpenError};
 pub use log::{LogBuffer, LogEntry, LogLevel};
+pub use outline::{Binding, ElementNode, Outline};
 pub use palette::{ComponentCategory, PaletteItem};
 pub use project::{FileNode, FileTree, SearchHit, SearchResults};
 pub use recent::RecentProjects;
