@@ -42,7 +42,26 @@ fn editor_area(ui: &mut Ui, state: &mut AppState) {
         .and_then(|i| workspace.documents.get_mut(i))
     {
         let diagnostics = state.diagnostics.for_path(document.doc.path());
-        editor::show(ui, document, diagnostics, project, &palette, &mut commands);
+        let selection = state
+            .designer
+            .selected
+            .as_ref()
+            .filter(|s| s.path == document.doc.path())
+            .and_then(|s| {
+                let outline = document.outline();
+                let node = &outline.elements[outline.by_tree_path(&s.tree_path)?];
+                let lines = document.doc.line_index();
+                Some(lines.line_of(node.start)..=lines.line_of(node.end.saturating_sub(1)))
+            });
+        editor::show(
+            ui,
+            document,
+            diagnostics,
+            selection,
+            project,
+            &palette,
+            &mut commands,
+        );
     }
     for command in commands {
         state.send(command);

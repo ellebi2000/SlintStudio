@@ -2,6 +2,7 @@
 
 mod app;
 mod commands;
+mod designer;
 mod fonts;
 mod layout;
 mod logging;

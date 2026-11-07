@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use slint_studio_core::Diagnostic;
-use slint_studio_preview::{PreviewError, PreviewRequest, PreviewService, RenderedPreview, Waker};
+use slint_studio_preview::{
+    ElementGeometry, PreviewError, PreviewRequest, PreviewService, RenderedPreview, Waker,
+};
 use tracing::{debug, error};
 
 /// Delay between the last keystroke and the render.
@@ -54,6 +56,8 @@ pub struct PreviewImage {
     /// Size in logical pixels (egui points at 100% zoom).
     pub logical_size: egui::Vec2,
     pub duration: Duration,
+    /// Where each element was drawn (see `slint_studio_preview::geometry`).
+    pub elements: Vec<ElementGeometry>,
 }
 
 /// Why the latest render failed; shown over the (stale) image.
@@ -185,6 +189,7 @@ impl PreviewManager {
             component: preview.component,
             logical_size,
             duration: preview.duration,
+            elements: preview.elements,
         });
         self.failure = None;
     }

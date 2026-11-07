@@ -1,13 +1,15 @@
 //! The open project and its documents.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use directories::ProjectDirs;
 use slint_studio_core::project::{self, FileTree};
 use slint_studio_core::{
-    Diagnostic, DiagnosticCounts, Document, OpenError, RecentProjects, app_dirs,
+    Diagnostic, DiagnosticCounts, Document, OpenError, Outline, RecentProjects, app_dirs,
 };
 use tracing::warn;
 
@@ -88,6 +90,32 @@ impl Project {
 pub struct OpenDocument {
     pub doc: Document,
     pub editor: EditorState,
+    /// Parsed structure, cached per document version.
+    outline: RefCell<Option<(i32, Rc<Outline>)>>,
+}
+
+impl OpenDocument {
+    pub fn new(doc: Document) -> Self {
+        Self {
+            doc,
+            editor: EditorState::default(),
+            outline: RefCell::new(None),
+        }
+    }
+
+    /// The document's elements and bindings (reparsed after edits).
+    pub fn outline(&self) -> Rc<Outline> {
+        let version = self.doc.version();
+        let mut cache = self.outline.borrow_mut();
+        match &*cache {
+            Some((cached, outline)) if *cached == version => Rc::clone(outline),
+            _ => {
+                let outline = Rc::new(Outline::parse(self.doc.text()));
+                *cache = Some((version, Rc::clone(&outline)));
+                outline
+            }
+        }
+    }
 }
 
 pub struct Workspace {
@@ -162,10 +190,7 @@ impl Workspace {
             return Ok(false);
         }
         let doc = Document::open(path)?;
-        self.documents.push(OpenDocument {
-            doc,
-            editor: EditorState::default(),
-        });
+        self.documents.push(OpenDocument::new(doc));
         self.active = Some(self.documents.len() - 1);
         Ok(true)
     }

@@ -4,7 +4,7 @@
 //! Built on egui's `TextEdit`. Positions are char indices (egui's cursor
 //! unit); conversions to the language server's encoding happen in the app.
 
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use egui::text::{CCursor, CCursorRange};
 use egui::text_edit::TextEditOutput;
@@ -243,6 +243,7 @@ pub fn show(
     ui: &mut Ui,
     document: &mut OpenDocument,
     diagnostics: &[Diagnostic],
+    selection: Option<RangeInclusive<usize>>,
     project: Option<&Project>,
     palette: &Palette,
     commands: &mut Vec<Command>,
@@ -342,7 +343,16 @@ pub fn show(
         });
     }
 
-    paint_gutter(ui, gutter, &output, document, diagnostics, palette, &theme);
+    paint_gutter(
+        ui,
+        gutter,
+        &output,
+        document,
+        diagnostics,
+        selection,
+        palette,
+        &theme,
+    );
     let hovered = paint_diagnostics(
         ui,
         text_rect,
@@ -659,12 +669,14 @@ fn severity_color(severity: Severity, palette: &Palette) -> Color32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_gutter(
     ui: &Ui,
     rect: Rect,
     output: &TextEditOutput,
     document: &OpenDocument,
     diagnostics: &[Diagnostic],
+    selection: Option<RangeInclusive<usize>>,
     palette: &Palette,
     theme: &CodeTheme,
 ) {
@@ -708,6 +720,15 @@ fn paint_gutter(
                     severity_color(*severity, palette),
                 );
             }
+        }
+        // Lines of the element selected in the designer.
+        if selection
+            .as_ref()
+            .is_some_and(|lines| lines.contains(&line))
+        {
+            let bar =
+                Rect::from_x_y_ranges(rect.right() - 3.0..=rect.right() - 1.0, row_rect.y_range());
+            painter.rect_filled(bar, 0.0, palette.accent);
         }
         starts_line = row.ends_with_newline;
         if row.ends_with_newline {

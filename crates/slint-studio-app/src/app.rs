@@ -7,13 +7,17 @@ use std::time::Duration;
 
 use egui::{Key, KeyboardShortcut, Modifiers, TextEdit};
 use egui_dock::{DockArea, DockState};
+use slint_studio_core::edit::{self, SourceEdit};
 use slint_studio_core::project as core_project;
 use slint_studio_core::text::{byte_to_char, char_to_byte};
-use slint_studio_core::{Language, LineCol, LogBuffer, PositionEncoding, ViewMode};
+use slint_studio_core::{
+    ElementNode, Language, LineCol, LogBuffer, PaletteItem, PositionEncoding, ViewMode, properties,
+};
 use slint_studio_lsp::{DefinitionTarget, LspEvent, RequestId, convert};
 use tracing::{debug, error, info, warn};
 
 use crate::commands::{Command, GuardedAction, UnsavedChoice};
+use crate::designer::{DesignerState, ElementRef};
 use crate::fonts::{self, FontChoice};
 use crate::layout::{self, Tab};
 use crate::logging::RepaintSignal;
@@ -57,6 +61,7 @@ pub struct AppState {
     /// Action waiting for the "unsaved changes" dialog.
     pub unsaved: Option<GuardedAction>,
     pub preview: PreviewManager,
+    pub designer: DesignerState,
     commands: Vec<Command>,
 }
 
@@ -76,6 +81,7 @@ impl AppState {
             show_about: false,
             unsaved: None,
             preview,
+            designer: DesignerState::default(),
             commands: Vec::new(),
         }
     }
@@ -310,15 +316,34 @@ impl StudioApp {
             }
             Command::Undo => self.undo_redo(ctx, false),
             Command::Redo => self.undo_redo(ctx, true),
-            Command::DocumentEdited(path) => {
-                if let (Some(client), Some(open)) =
-                    (self.lsp.client(), self.state.workspace.document(&path))
-                    && open.doc.language() == Language::Slint
-                {
-                    client.did_change(&path, open.doc.text(), open.doc.version());
-                }
-                if self.state.live_preview && is_slint(&path) {
-                    self.state.preview.schedule(EDIT_DEBOUNCE);
+            Command::DocumentEdited(path) => self.document_changed(&path, EDIT_DEBOUNCE),
+
+            Command::SelectElement(element) => self.select_element(element),
+            Command::SetProperty {
+                element,
+                name,
+                value,
+            } => {
+                self.edit_element(&element, |text, node| {
+                    edit::set_binding(text, node, &name, value.as_deref()).map(|e| (e, None))
+                });
+            }
+            Command::InsertComponent { item, parent } => self.insert_component(item, parent),
+            Command::ResizeElement {
+                element,
+                x,
+                y,
+                width,
+                height,
+            } => self.resize_element(
+                &element,
+                [("x", x), ("y", y), ("width", width), ("height", height)],
+            ),
+            Command::RemoveElement(element) => {
+                if self.edit_element(&element, |text, node| {
+                    Some((edit::remove_element(text, node), None))
+                }) {
+                    self.state.designer.selected = None;
                 }
             }
 
@@ -428,6 +453,7 @@ impl StudioApp {
         self.lsp.stop();
         self.watcher = None;
         self.state.preview.clear();
+        self.state.designer = DesignerState::default();
         let workspace = &mut self.state.workspace;
         workspace.documents.clear();
         workspace.active = None;
@@ -572,6 +598,197 @@ impl StudioApp {
         );
         self.state.explorer.results = Some(results);
         layout::open(&mut self.dock, Tab::Search);
+    }
+
+    // --- Designer -------------------------------------------------------------
+
+    /// After any change to a document's text: inform the language server and
+    /// re-render the preview after `delay`.
+    fn document_changed(&mut self, path: &Path, delay: Duration) {
+        if let (Some(client), Some(open)) = (self.lsp.client(), self.state.workspace.document(path))
+            && open.doc.language() == Language::Slint
+        {
+            client.did_change(path, open.doc.text(), open.doc.version());
+        }
+        if self.state.live_preview && is_slint(path) {
+            self.state.preview.schedule(delay);
+        }
+    }
+
+    /// Selects an element and moves the editor cursor to its declaration.
+    fn select_element(&mut self, element: Option<ElementRef>) {
+        let Some(element) = element else {
+            self.state.designer.selected = None;
+            return;
+        };
+        if !self.open_file(&element.path) {
+            return;
+        }
+        if let Some(open) = self.state.workspace.document_mut(&element.path) {
+            let outline = open.outline();
+            if let Some(index) = outline.by_tree_path(&element.tree_path) {
+                let char_index = byte_to_char(open.doc.text(), outline.elements[index].key_offset);
+                open.editor.reveal = Some(char_index);
+                open.editor.cursor = char_index;
+                self.state.designer.synced_cursor = Some((element.path.clone(), char_index));
+            }
+        }
+        self.state.designer.selected = Some(element);
+    }
+
+    /// The selection follows the editor cursor in the previewed file.
+    fn sync_selection_with_cursor(&mut self) {
+        let Some(open) = self.state.workspace.active_document() else {
+            return;
+        };
+        if open.doc.language() != Language::Slint || !self.state.preview.previews(open.doc.path()) {
+            return;
+        }
+        let key = (open.doc.path().to_path_buf(), open.editor.cursor);
+        if self.state.designer.synced_cursor.as_ref() == Some(&key) {
+            return;
+        }
+        let outline = open.outline();
+        let byte = char_to_byte(open.doc.text(), open.editor.cursor);
+        self.state.designer.selected = outline.element_at(byte).map(|index| ElementRef {
+            path: key.0.clone(),
+            tree_path: outline.tree_path(index),
+        });
+        self.state.designer.synced_cursor = Some(key);
+    }
+
+    /// Applies an edit computed from `element`'s current source. The edit
+    /// may name an offset (in the new text) of an element to select.
+    fn edit_element(
+        &mut self,
+        element: &ElementRef,
+        make: impl FnOnce(&str, &ElementNode) -> Option<(SourceEdit, Option<usize>)>,
+    ) -> bool {
+        let Some(open) = self.state.workspace.document(&element.path) else {
+            warn!("Il file {} non è aperto", element.path.display());
+            return false;
+        };
+        let outline = open.outline();
+        let Some(index) = outline.by_tree_path(&element.tree_path) else {
+            warn!("Elemento non trovato nel codice: aggiorna l'anteprima e riprova");
+            return false;
+        };
+        let Some((change, select)) = make(open.doc.text(), &outline.elements[index]) else {
+            return false;
+        };
+        let text = change.apply(open.doc.text());
+        self.replace_text(&element.path, text, select);
+        true
+    }
+
+    /// Replaces a document's text (one undoable change in the editor) and
+    /// optionally selects the element starting at `select`.
+    fn replace_text(&mut self, path: &Path, text: String, select: Option<usize>) {
+        let Some(open) = self.state.workspace.document_mut(path) else {
+            return;
+        };
+        open.doc.set_text(text);
+        if let Some(offset) = select {
+            let outline = open.outline();
+            if let Some(index) = outline.element_at(offset) {
+                let element = ElementRef {
+                    path: path.to_path_buf(),
+                    tree_path: outline.tree_path(index),
+                };
+                self.select_element(Some(element));
+            }
+        }
+        // Designer edits are deliberate: show them almost immediately.
+        self.document_changed(path, Duration::from_millis(30));
+    }
+
+    /// Where palette items go when nothing is selected: the root of the
+    /// previewed component (the last one in the file).
+    fn default_insertion_target(&self) -> Option<ElementRef> {
+        let path = self.state.preview.target.clone()?;
+        let open = self.state.workspace.document(&path)?;
+        let outline = open.outline();
+        let root = outline.roots().last()?;
+        Some(ElementRef {
+            path,
+            tree_path: outline.tree_path(root),
+        })
+    }
+
+    fn insert_component(&mut self, item: &'static str, parent: Option<ElementRef>) {
+        let Some(palette) = PaletteItem::all().iter().find(|p| p.name == item) else {
+            return;
+        };
+        let target = parent
+            .or_else(|| self.state.designer.selected.clone())
+            .or_else(|| self.default_insertion_target());
+        let Some(target) = target else {
+            info!("Apri un file .slint per inserire componenti");
+            return;
+        };
+        let Some(open) = self.state.workspace.document(&target.path) else {
+            return;
+        };
+        let outline = open.outline();
+        let Some(mut index) = outline.by_tree_path(&target.tree_path) else {
+            return;
+        };
+        // Leaf elements (Text, Button, …) cannot have children: use the parent.
+        while !properties::accepts_children(&outline.elements[index].type_name) {
+            match outline.elements[index].parent {
+                Some(parent) => index = parent,
+                None => break,
+            }
+        }
+        let container = &outline.elements[index];
+        let text = open.doc.text();
+        let Some((insert, mut start)) = edit::insert_child(text, container, palette.snippet) else {
+            warn!(
+                "Impossibile inserire in {}: elemento senza parentesi di chiusura",
+                container.label()
+            );
+            return;
+        };
+        let mut new_text = insert.apply(text);
+        if let Some(module) = palette.import_from()
+            && let Some(import) = edit::ensure_import(&new_text, palette.name, module)
+        {
+            if import.range.start <= start {
+                start = start + import.replacement.len() - import.range.len();
+            }
+            new_text = import.apply(&new_text);
+        }
+        info!("Inserito {} in {}", palette.name, container.label());
+        let path = target.path.clone();
+        self.replace_text(&path, new_text, Some(start));
+    }
+
+    /// Writes geometry bindings (`{value}px`) as a single change.
+    fn resize_element(&mut self, element: &ElementRef, values: [(&str, Option<i32>); 4]) {
+        let Some(open) = self.state.workspace.document(&element.path) else {
+            return;
+        };
+        let mut text = open.doc.text().to_owned();
+        for (name, value) in values {
+            let Some(value) = value else {
+                continue;
+            };
+            let outline = slint_studio_core::Outline::parse(&text);
+            let Some(index) = outline.by_tree_path(&element.tree_path) else {
+                return;
+            };
+            if let Some(change) = edit::set_binding(
+                &text,
+                &outline.elements[index],
+                name,
+                Some(&format!("{value}px")),
+            ) {
+                text = change.apply(&text);
+            }
+        }
+        if text != open.doc.text() {
+            self.replace_text(&element.path.clone(), text, None);
+        }
     }
 
     // --- Live preview and file watching ---------------------------------------
@@ -827,6 +1044,7 @@ impl eframe::App for StudioApp {
         self.guard_window_close(&ctx);
         self.process_file_changes();
         self.update_preview(&ctx);
+        self.sync_selection_with_cursor();
         let palette = self.state.palette;
 
         egui::Panel::top("menu_bar")
@@ -879,6 +1097,7 @@ impl eframe::App for StudioApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::designer::ElementRef;
     use egui::accesskit::Role;
     use egui_kittest::kittest::{NodeT as _, Queryable as _};
     use egui_kittest::{Harness, Node};
@@ -1246,7 +1465,7 @@ mod tests {
             harness.state().state.preview.image.is_some(),
             "the last good image is kept"
         );
-        harness.get_by_label_contains("colour");
+        harness.get_by_label_contains("Unknown property colour");
 
         // Fixing the buffer (still unsaved) updates the preview again.
         harness
@@ -1312,6 +1531,231 @@ mod tests {
         assert_eq!(
             state.preview.image.as_ref().unwrap().logical_size,
             egui::vec2(30.0, 30.0)
+        );
+    }
+
+    fn element(harness: &Harness<'_, StudioApp>, tree_path: &[usize]) -> ElementRef {
+        let path = harness
+            .state()
+            .state
+            .workspace
+            .active_document()
+            .unwrap()
+            .doc
+            .path()
+            .to_path_buf();
+        ElementRef {
+            path,
+            tree_path: tree_path.to_vec(),
+        }
+    }
+
+    fn active_text(harness: &Harness<'_, StudioApp>) -> String {
+        harness
+            .state()
+            .state
+            .workspace
+            .active_document()
+            .unwrap()
+            .doc
+            .text()
+            .to_owned()
+    }
+
+    fn rendered(
+        harness: &Harness<'_, StudioApp>,
+        tree_path: &[usize],
+    ) -> slint_studio_preview::ElementRect {
+        let image = harness
+            .state()
+            .state
+            .preview
+            .image
+            .as_ref()
+            .expect("preview");
+        image
+            .elements
+            .iter()
+            .find(|g| g.tree_path == tree_path)
+            .unwrap_or_else(|| panic!("no geometry for {tree_path:?}"))
+            .rects[0]
+    }
+
+    #[test]
+    fn the_preview_carries_element_geometry() {
+        let dir = project_dir();
+        let harness = with_project(&dir);
+        let root = rendered(&harness, &[0]);
+        let text = rendered(&harness, &[0, 0]);
+        assert!(root.width >= text.width && root.height >= text.height);
+        assert!(text.width > 0.0);
+    }
+
+    #[test]
+    fn selecting_from_the_canvas_moves_the_editor_cursor_and_vice_versa() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        let text_element = element(&harness, &[0, 0]);
+        send(
+            &mut harness,
+            Command::SelectElement(Some(text_element.clone())),
+        );
+        let state = &harness.state().state;
+        assert_eq!(state.designer.selected.as_ref(), Some(&text_element));
+        let open = state.workspace.active_document().unwrap();
+        let cursor_text: String = open
+            .doc
+            .text()
+            .chars()
+            .skip(open.editor.cursor)
+            .take(4)
+            .collect();
+        assert_eq!(cursor_text, "Text", "cursor on the element's declaration");
+
+        // Moving the editor cursor to the root selects the root.
+        editor::set_cursor(&harness.ctx, editor::text_edit_id(&text_element.path), 2);
+        settle(&mut harness);
+        assert_eq!(
+            harness.state().state.designer.selected,
+            Some(element(&harness, &[0]))
+        );
+    }
+
+    #[test]
+    fn editing_a_property_rewrites_the_source_and_the_preview() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        let root = element(&harness, &[0]);
+        for (name, value) in [("width", "240px"), ("height", "120px")] {
+            send(
+                &mut harness,
+                Command::SetProperty {
+                    element: root.clone(),
+                    name: name.into(),
+                    value: Some(value.into()),
+                },
+            );
+        }
+        let text = active_text(&harness);
+        assert!(
+            text.contains("    width: 240px;\n    height: 120px;\n"),
+            "{text}"
+        );
+        let rect = rendered(&harness, &[0]);
+        assert_eq!((rect.width, rect.height), (240.0, 120.0));
+
+        send(
+            &mut harness,
+            Command::SetProperty {
+                element: root,
+                name: "height".into(),
+                value: None,
+            },
+        );
+        assert!(!active_text(&harness).contains("height"));
+    }
+
+    #[test]
+    fn palette_insertion_adds_the_import_and_selects_the_new_element() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        send(
+            &mut harness,
+            Command::InsertComponent {
+                item: "Button",
+                parent: None,
+            },
+        );
+        let text = active_text(&harness);
+        assert!(
+            text.starts_with("import { Button } from \"std-widgets.slint\";"),
+            "{text}"
+        );
+        assert!(
+            text.contains("    Button {\n        text: \"Pulsante\";\n    }\n}"),
+            "{text}"
+        );
+        assert_eq!(
+            harness.state().state.designer.selected,
+            Some(element(&harness, &[0, 1]))
+        );
+        assert!(
+            harness.state().state.preview.failure.is_none(),
+            "the inserted code compiles"
+        );
+        rendered(&harness, &[0, 1]);
+
+        // Inserting "into" a Text (which has no children) goes to its parent.
+        let text_element = element(&harness, &[0, 0]);
+        send(
+            &mut harness,
+            Command::InsertComponent {
+                item: "Rectangle",
+                parent: Some(text_element),
+            },
+        );
+        assert_eq!(
+            harness.state().state.designer.selected,
+            Some(element(&harness, &[0, 2]))
+        );
+    }
+
+    #[test]
+    fn resize_and_remove_update_the_source() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        let text_element = element(&harness, &[0, 0]);
+        send(
+            &mut harness,
+            Command::ResizeElement {
+                element: text_element.clone(),
+                x: Some(5),
+                y: None,
+                width: Some(80),
+                height: Some(30),
+            },
+        );
+        let text = active_text(&harness);
+        assert!(
+            text.contains("Text { text: \"Ciao\"; x: 5px; width: 80px; height: 30px; }"),
+            "{text}"
+        );
+        let rect = rendered(&harness, &[0, 0]);
+        assert_eq!((rect.x, rect.width, rect.height), (5.0, 80.0, 30.0));
+
+        send(
+            &mut harness,
+            Command::SelectElement(Some(text_element.clone())),
+        );
+        send(&mut harness, Command::RemoveElement(text_element));
+        assert!(!active_text(&harness).contains("Text"));
+        assert!(harness.state().state.designer.selected.is_none());
+    }
+
+    #[test]
+    fn the_property_panel_shows_the_selected_element() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        let text_element = element(&harness, &[0, 0]);
+        send(&mut harness, Command::SelectElement(Some(text_element)));
+        harness.get_by_label_contains("Geometria");
+        harness.get_by_label_contains("Aspetto");
+        harness.get_by_label("font-size");
+        // The text property is edited without quotes.
+        assert!(harness.query_all_by_value("Ciao").count() >= 1);
+    }
+
+    #[test]
+    fn clicking_a_palette_item_inserts_it() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        let label = label(egui_phosphor::regular::SHAPES, "Rectangle");
+        harness.get_by_role_and_label(Role::Button, &label).click();
+        settle(&mut harness);
+        let text = active_text(&harness);
+        assert!(
+            text.contains("    Rectangle {\n        width: 100px;"),
+            "{text}"
         );
     }
 }

@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use slint_studio_core::{LineCol, ViewMode};
 
+use crate::designer::ElementRef;
 use crate::layout::Tab;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +62,31 @@ pub enum Command {
     RestartLsp,
     /// Re-renders the preview now, even with live preview off.
     RefreshPreview,
+
+    // Designer
+    /// Selects an element (from the canvas) and shows it in the editor.
+    SelectElement(Option<ElementRef>),
+    /// Sets (or with `None` removes) a property binding.
+    SetProperty {
+        element: ElementRef,
+        name: String,
+        value: Option<String>,
+    },
+    /// Inserts a palette item as a child of `parent` (default: the selected
+    /// element, else the previewed component's root).
+    InsertComponent {
+        item: &'static str,
+        parent: Option<ElementRef>,
+    },
+    /// Writes a new geometry, in whole logical pixels.
+    ResizeElement {
+        element: ElementRef,
+        x: Option<i32>,
+        y: Option<i32>,
+        width: Option<i32>,
+        height: Option<i32>,
+    },
+    RemoveElement(ElementRef),
 
     /// Answer to the "unsaved changes" dialog.
     ResolveUnsaved(UnsavedChoice),
