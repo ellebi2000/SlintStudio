@@ -12,7 +12,8 @@ name = "slint-studio"
 path = "src/main.rs"
 
 [dependencies]
-slint-studio-core.workspace = true
+slint-studio-compiler.workspace = true
+slint-studio-core = { workspace = true, features = ["install"] }
 slint-studio-lsp.workspace = true
 slint-studio-preview.workspace = true
 

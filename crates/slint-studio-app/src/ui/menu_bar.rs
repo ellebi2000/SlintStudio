@@ -270,20 +270,44 @@ fn project_menu(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn run_menu(ui: &mut Ui, state: &mut AppState) {
-    planned(
+    let enabled = state.workspace.project.is_some() && state.project_kind.is_supported();
+    let can_stop = state.runner.is_running() && !state.runner.is_stopping();
+    item(
         ui,
-        Planned::new("Compila", 4)
-            .icon(icon::HAMMER)
-            .shortcut("Ctrl+B"),
+        state,
+        enabled,
+        Some(icon::HAMMER),
+        "Compila",
+        Some("Ctrl+B"),
+        Command::Build,
     );
-    planned(
+    item(
         ui,
-        Planned::new("Esegui", 4)
-            .icon(icon::PLAY)
-            .shortcut("Ctrl+R"),
+        state,
+        enabled,
+        Some(icon::PLAY),
+        "Esegui",
+        Some("Ctrl+R"),
+        Command::Run,
     );
-    planned(ui, Planned::new("Interrompi", 4).icon(icon::STOP));
+    item(
+        ui,
+        state,
+        can_stop,
+        Some(icon::STOP),
+        "Interrompi",
+        Some("Maiusc+F5"),
+        Command::StopRun,
+    );
     ui.separator();
+    if state.workspace.project.is_some() {
+        ui.label(
+            RichText::new(format!("Progetto: {}", state.project_kind.label()))
+                .small()
+                .weak(),
+        );
+        ui.separator();
+    }
     let mut live = state.live_preview;
     if ui.checkbox(&mut live, "Anteprima live").clicked() {
         state.send(Command::ToggleLivePreview);

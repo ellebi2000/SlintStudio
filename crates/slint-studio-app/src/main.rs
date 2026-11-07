@@ -8,6 +8,7 @@ mod layout;
 mod logging;
 mod lsp;
 mod preview;
+mod runner;
 mod theme;
 mod ui;
 mod watcher;
@@ -18,8 +19,10 @@ use std::process::ExitCode;
 
 use anyhow::anyhow;
 use eframe::Renderer;
+use slint_studio_compiler::viewer::SLINT_VIEWER;
 use slint_studio_core::LogBuffer;
-use slint_studio_lsp::install::{self, InstallProgress, SLINT_LSP_VERSION};
+use slint_studio_core::install::{InstallProgress, ManagedTool};
+use slint_studio_lsp::install::{SLINT_LSP, SLINT_LSP_VERSION};
 use tracing::{info, warn};
 
 use crate::app::StartupOptions;
@@ -34,18 +37,20 @@ Uso: slint-studio [OPZIONI] [CARTELLA]
 Apre Slint Studio, opzionalmente sul progetto in CARTELLA.
 
 Opzioni:
-      --install-lsp  scarica e installa slint-lsp, poi esce
-  -h, --help         mostra questo aiuto
-  -V, --version      mostra la versione
+      --install-lsp     scarica e installa slint-lsp, poi esce
+      --install-viewer  scarica e installa slint-viewer, poi esce
+  -h, --help            mostra questo aiuto
+  -V, --version         mostra la versione
 
 Variabili d'ambiente:
   SLINT_STUDIO_LSP       eseguibile slint-lsp da usare al posto di quello gestito
+  SLINT_STUDIO_VIEWER    eseguibile slint-viewer da usare al posto di quello gestito
   SLINT_STUDIO_RENDERER  renderer grafico: wgpu (predefinito) o glow
   RUST_LOG               livello di log (es. debug)";
 
 enum Invocation {
     Run(Option<PathBuf>),
-    InstallLsp,
+    Install(ManagedTool),
     Help,
     Version,
 }
@@ -54,7 +59,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     let mut project = None;
     for arg in args {
         match arg.as_str() {
-            "--install-lsp" => return Ok(Invocation::InstallLsp),
+            "--install-lsp" => return Ok(Invocation::Install(SLINT_LSP)),
+            "--install-viewer" => return Ok(Invocation::Install(SLINT_VIEWER)),
             "-h" | "--help" => return Ok(Invocation::Help),
             "-V" | "--version" => return Ok(Invocation::Version),
             option if option.starts_with('-') => {
@@ -75,12 +81,13 @@ fn main() -> ExitCode {
         }
         Ok(Invocation::Version) => {
             println!(
-                "slint-studio {} (slint-lsp {SLINT_LSP_VERSION})",
-                env!("CARGO_PKG_VERSION")
+                "slint-studio {} (slint-lsp {SLINT_LSP_VERSION}, slint-viewer {})",
+                env!("CARGO_PKG_VERSION"),
+                SLINT_VIEWER.version
             );
             ExitCode::SUCCESS
         }
-        Ok(Invocation::InstallLsp) => install_lsp(),
+        Ok(Invocation::Install(tool)) => install_tool(&tool),
         Ok(Invocation::Run(project)) => match run_gui(project) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
@@ -95,18 +102,17 @@ fn main() -> ExitCode {
     }
 }
 
-/// `--install-lsp`: what an installer runs to provision the language server.
-fn install_lsp() -> ExitCode {
-    if let Some(path) = install::managed_binary().filter(|p| p.is_file()) {
-        println!(
-            "slint-lsp {SLINT_LSP_VERSION} è già installato: {}",
-            path.display()
-        );
+/// `--install-lsp` / `--install-viewer`: what an installer runs to provision
+/// the managed tools.
+fn install_tool(tool: &ManagedTool) -> ExitCode {
+    let (name, version) = (tool.name, tool.version);
+    if let Some(path) = tool.managed_binary().filter(|p| p.is_file()) {
+        println!("{name} {version} è già installato: {}", path.display());
         return ExitCode::SUCCESS;
     }
-    println!("Download di slint-lsp {SLINT_LSP_VERSION}…");
+    println!("Download di {name} {version}…");
     let mut last_percent = None;
-    let result = install::install(&mut |progress| match progress {
+    let result = tool.install(&mut |progress| match progress {
         InstallProgress::Downloading {
             received,
             total: Some(total),
@@ -123,7 +129,7 @@ fn install_lsp() -> ExitCode {
     });
     match result {
         Ok(path) => {
-            println!("slint-lsp installato in {}", path.display());
+            println!("{name} installato in {}", path.display());
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -209,7 +215,11 @@ mod tests {
         );
         assert!(matches!(
             parse(&["--install-lsp"]),
-            Ok(Invocation::InstallLsp)
+            Ok(Invocation::Install(tool)) if tool.name == "slint-lsp"
+        ));
+        assert!(matches!(
+            parse(&["--install-viewer"]),
+            Ok(Invocation::Install(tool)) if tool.name == "slint-viewer"
         ));
         assert!(matches!(parse(&["-h"]), Ok(Invocation::Help)));
         assert!(matches!(parse(&["--version"]), Ok(Invocation::Version)));

@@ -1,28 +1,16 @@
-//! Toolbar: run/build, live preview toggle and view mode switcher.
+//! Toolbar: run/build/stop, live preview toggle and view mode switcher.
 
 use egui::{Button, Ui};
 use egui_phosphor::regular as icon;
 use slint_studio_core::ViewMode;
 
-use super::{planned_button, view_mode_icon, with_icon};
+use super::{ico, view_mode_icon, with_icon};
 use crate::app::AppState;
-use crate::commands::{Command, Planned};
+use crate::commands::Command;
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
-        planned_button(
-            ui,
-            Planned::new("Esegui", 4)
-                .icon(icon::PLAY)
-                .shortcut("Ctrl+R"),
-        );
-        planned_button(
-            ui,
-            Planned::new("Compila", 4)
-                .icon(icon::HAMMER)
-                .shortcut("Ctrl+B"),
-        );
-
+        run_controls(ui, state);
         ui.separator();
 
         let (glyph, tooltip) = if state.live_preview {
@@ -64,5 +52,53 @@ fn mode_tooltip(mode: ViewMode) -> &'static str {
         ViewMode::Code => "Solo editor di codice",
         ViewMode::Split => "Editor sopra, anteprima sotto",
         ViewMode::Design => "Solo canvas di design",
+    }
+}
+
+/// Esegui, Compila and Interrompi, with tooltips saying what they run.
+fn run_controls(ui: &mut Ui, state: &mut AppState) {
+    let has_project = state.workspace.project.is_some();
+    let kind = &state.project_kind;
+    let enabled = has_project && kind.is_supported();
+    let disabled_reason = if has_project {
+        "Il progetto non ha né un Cargo.toml né file .slint"
+    } else {
+        "Apri un progetto per compilarlo ed eseguirlo"
+    };
+    let runner = &state.runner;
+    let mut commands = Vec::new();
+
+    let play = ico(icon::PLAY).color(if enabled {
+        state.palette.accent_secondary
+    } else {
+        ui.visuals().weak_text_color()
+    });
+    let run = ui
+        .add_enabled(
+            enabled,
+            Button::new((play, egui::WidgetText::from("Esegui"))),
+        )
+        .on_hover_text(format!("{} · Ctrl+R", kind.run_description()))
+        .on_disabled_hover_text(disabled_reason);
+    if run.clicked() {
+        commands.push(Command::Run);
+    }
+    let build = ui
+        .add_enabled(enabled, Button::new(with_icon(icon::HAMMER, "Compila")))
+        .on_hover_text(format!("{} · Ctrl+B", kind.build_description()))
+        .on_disabled_hover_text(disabled_reason);
+    if build.clicked() {
+        commands.push(Command::Build);
+    }
+    let can_stop = runner.is_running() && !runner.is_stopping();
+    let stop = ui
+        .add_enabled(can_stop, Button::new(with_icon(icon::STOP, "Interrompi")))
+        .on_hover_text("Interrompe la compilazione o il programma · Maiusc+F5")
+        .on_disabled_hover_text("Niente in esecuzione");
+    if stop.clicked() {
+        commands.push(Command::StopRun);
+    }
+    for command in commands {
+        state.send(command);
     }
 }

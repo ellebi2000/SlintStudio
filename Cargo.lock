@@ -5259,6 +5259,7 @@ dependencies = [
  "fontdb 0.23.0",
  "notify",
  "rfd",
+ "slint-studio-compiler",
  "slint-studio-core",
  "slint-studio-lsp",
  "slint-studio-preview",

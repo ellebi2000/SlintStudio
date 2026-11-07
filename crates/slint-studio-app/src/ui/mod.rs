@@ -76,16 +76,6 @@ fn planned_widget(planned: &Planned) -> Button<'static> {
     }
 }
 
-/// A disabled button for a feature that arrives in a later phase.
-pub fn planned_button(ui: &mut Ui, planned: Planned) -> egui::Response {
-    let mut tooltip = planned.tooltip();
-    if let Some(shortcut) = planned.shortcut {
-        tooltip = format!("{tooltip} · {shortcut}");
-    }
-    ui.add_enabled(false, planned_widget(&planned))
-        .on_disabled_hover_text(tooltip)
-}
-
 /// A disabled menu entry for a feature that arrives in a later phase.
 pub fn planned_menu_item(ui: &mut Ui, planned: Planned) -> egui::Response {
     let mut button = planned_widget(&planned);

@@ -63,6 +63,15 @@ pub enum Command {
     /// Re-renders the preview now, even with live preview off.
     RefreshPreview,
 
+    // Build & run
+    /// "Compila": `cargo build`, or a check of the `.slint` files.
+    Build,
+    /// "Esegui": `cargo run`, or the previewed file in `slint-viewer`.
+    Run,
+    /// "Interrompi": stops the running build or program.
+    StopRun,
+    ClearTerminal,
+
     // Designer
     /// Selects an element (from the canvas) and shows it in the editor.
     SelectElement(Option<ElementRef>),

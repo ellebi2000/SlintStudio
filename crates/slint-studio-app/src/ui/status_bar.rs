@@ -1,5 +1,5 @@
-//! Status bar: problem counts, current mode, cursor position, language server
-//! and preview state.
+//! Status bar: problem counts, current mode, build/run state, cursor
+//! position, language server and preview state.
 
 use egui::{Align, Button, Layout, RichText, Ui};
 use egui_phosphor::regular as icon;
@@ -10,6 +10,7 @@ use super::{icon_label, view_mode_icon};
 use crate::app::AppState;
 use crate::commands::Command;
 use crate::layout::Tab;
+use crate::runner::RunnerStatus;
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     ui.visuals_mut().override_text_color = Some(state.palette.on_accent);
@@ -34,6 +35,31 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         ui.add_space(12.0);
         icon_label(ui, view_mode_icon(state.view_mode), state.view_mode.label())
             .on_hover_text("Modalità di visualizzazione");
+
+        let status = &state.runner.status;
+        if *status != RunnerStatus::Idle {
+            ui.add_space(12.0);
+            let glyph = if status.is_working() {
+                icon::HOURGLASS_MEDIUM
+            } else if status.is_failure() {
+                icon::X_CIRCLE
+            } else {
+                icon::CHECK_CIRCLE
+            };
+            let mut label = RichText::new(status.label());
+            if status.is_failure() {
+                label = label.strong();
+            }
+            let tooltip = status
+                .summary()
+                .unwrap_or_else(|| "Apri il pannello Terminale".to_owned());
+            let response = ui
+                .add(Button::new((super::ico(glyph), label)).frame(false))
+                .on_hover_text(tooltip);
+            if response.clicked() {
+                commands.push(Command::ShowPanel(Tab::Terminal));
+            }
+        }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(RichText::new(concat!("Slint Studio ", env!("CARGO_PKG_VERSION"))).small());

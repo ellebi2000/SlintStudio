@@ -1,7 +1,7 @@
 //! The open project and its documents.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -9,7 +9,8 @@ use std::rc::Rc;
 use directories::ProjectDirs;
 use slint_studio_core::project::{self, FileTree};
 use slint_studio_core::{
-    Diagnostic, DiagnosticCounts, Document, OpenError, Outline, RecentProjects, app_dirs,
+    Diagnostic, DiagnosticCounts, DiagnosticSource, Document, OpenError, Outline, RecentProjects,
+    app_dirs,
 };
 use tracing::warn;
 
@@ -220,34 +221,101 @@ impl Workspace {
     }
 }
 
-/// Diagnostics of every file, from the language server (and, later, the
-/// preview and the compiler).
+/// Diagnostics of every producer, by file.
+///
+/// Each producer (language server, compiler) replaces its own diagnostics
+/// independently; views read the merged list, where a problem reported by
+/// both (e.g. a `.slint` error found by slint-lsp and by "Compila") appears
+/// once. Diagnostics without a location are kept under an empty path.
 #[derive(Debug, Default)]
 pub struct DiagnosticStore {
-    by_path: BTreeMap<PathBuf, Vec<Diagnostic>>,
+    by_source: HashMap<DiagnosticSource, BTreeMap<PathBuf, Vec<Diagnostic>>>,
+    merged: BTreeMap<PathBuf, Vec<Diagnostic>>,
 }
 
 impl DiagnosticStore {
-    pub fn set(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>) {
+    /// Order in which producers are merged (the first copy of a duplicate
+    /// is kept).
+    const SOURCES: [DiagnosticSource; 3] = [
+        DiagnosticSource::Lsp,
+        DiagnosticSource::Compiler,
+        DiagnosticSource::Preview,
+    ];
+
+    /// Replaces the diagnostics `source` reported for `path`.
+    pub fn set(&mut self, source: DiagnosticSource, path: PathBuf, diagnostics: Vec<Diagnostic>) {
+        let files = self.by_source.entry(source).or_default();
         if diagnostics.is_empty() {
-            self.by_path.remove(&path);
+            files.remove(&path);
         } else {
-            self.by_path.insert(path, diagnostics);
+            files.insert(path.clone(), diagnostics);
+        }
+        self.rebuild(&path);
+    }
+
+    /// Adds one diagnostic of `source`, under the file of its location.
+    pub fn add(&mut self, source: DiagnosticSource, diagnostic: Diagnostic) {
+        let path = diagnostic
+            .location
+            .as_ref()
+            .map(|l| l.path.clone())
+            .unwrap_or_default();
+        self.by_source
+            .entry(source)
+            .or_default()
+            .entry(path.clone())
+            .or_default()
+            .push(diagnostic);
+        self.rebuild(&path);
+    }
+
+    /// Forgets everything `source` reported.
+    pub fn clear_source(&mut self, source: DiagnosticSource) {
+        if let Some(files) = self.by_source.remove(&source) {
+            for path in files.keys() {
+                self.rebuild(path);
+            }
         }
     }
 
     pub fn clear(&mut self) {
-        self.by_path.clear();
+        self.by_source.clear();
+        self.merged.clear();
+    }
+
+    fn rebuild(&mut self, path: &Path) {
+        let mut merged: Vec<Diagnostic> = Vec::new();
+        for source in Self::SOURCES {
+            let Some(diagnostics) = self.by_source.get(&source).and_then(|f| f.get(path)) else {
+                continue;
+            };
+            for diagnostic in diagnostics {
+                let duplicate = merged.iter().any(|d| {
+                    d.severity == diagnostic.severity
+                        && d.message == diagnostic.message
+                        && d.location == diagnostic.location
+                });
+                if !duplicate {
+                    merged.push(diagnostic.clone());
+                }
+            }
+        }
+        if merged.is_empty() {
+            self.merged.remove(path);
+        } else {
+            self.merged.insert(path.to_path_buf(), merged);
+        }
     }
 
     pub fn for_path(&self, path: &Path) -> &[Diagnostic] {
-        self.by_path.get(path).map_or(&[], Vec::as_slice)
+        self.merged.get(path).map_or(&[], Vec::as_slice)
     }
 
-    /// All diagnostics, grouped by path, errors first within each file.
+    /// All diagnostics, grouped by path (those without a location first),
+    /// errors first within each file.
     pub fn all(&self) -> Vec<&Diagnostic> {
         let mut all = Vec::new();
-        for diagnostics in self.by_path.values() {
+        for diagnostics in self.merged.values() {
             let mut sorted: Vec<_> = diagnostics.iter().collect();
             sorted.sort_by(|a, b| {
                 b.severity.cmp(&a.severity).then_with(|| {
@@ -261,11 +329,11 @@ impl DiagnosticStore {
     }
 
     pub fn counts(&self) -> DiagnosticCounts {
-        self.by_path.values().flatten().collect()
+        self.merged.values().flatten().collect()
     }
 
     pub fn len(&self) -> usize {
-        self.by_path.values().map(Vec::len).sum()
+        self.merged.values().map(Vec::len).sum()
     }
 }
 
@@ -354,6 +422,7 @@ mod tests {
         };
         let mut store = DiagnosticStore::default();
         store.set(
+            DiagnosticSource::Lsp,
             "/p/a.slint".into(),
             vec![
                 diagnostic(Severity::Warning, 1),
@@ -367,7 +436,58 @@ mod tests {
         assert_eq!(all[2].severity, Severity::Warning);
         assert_eq!(store.counts().errors, 2);
 
-        store.set("/p/a.slint".into(), Vec::new());
+        store.set(DiagnosticSource::Lsp, "/p/a.slint".into(), Vec::new());
         assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn diagnostic_store_merges_sources() {
+        let diagnostic = |source, message: &str, path: Option<&str>| Diagnostic {
+            severity: Severity::Error,
+            source,
+            message: message.into(),
+            location: path.map(|p| Location::at(p, LineCol::new(0, 0))),
+        };
+        let path = PathBuf::from("/p/a.slint");
+        let mut store = DiagnosticStore::default();
+        store.set(
+            DiagnosticSource::Lsp,
+            path.clone(),
+            vec![diagnostic(
+                DiagnosticSource::Lsp,
+                "same",
+                Some("/p/a.slint"),
+            )],
+        );
+        // The compiler reports the same error, another one and a global one.
+        store.add(
+            DiagnosticSource::Compiler,
+            diagnostic(DiagnosticSource::Compiler, "same", Some("/p/a.slint")),
+        );
+        store.add(
+            DiagnosticSource::Compiler,
+            diagnostic(
+                DiagnosticSource::Compiler,
+                "only compiler",
+                Some("/p/a.slint"),
+            ),
+        );
+        store.add(
+            DiagnosticSource::Compiler,
+            diagnostic(DiagnosticSource::Compiler, "linker", None),
+        );
+        assert_eq!(store.len(), 3, "the duplicate is shown once");
+        assert_eq!(store.for_path(&path).len(), 2);
+        assert_eq!(store.for_path(&path)[0].source, DiagnosticSource::Lsp);
+        assert_eq!(store.all()[0].message, "linker", "unlocated first");
+
+        // The language server updating its diagnostics keeps the compiler's.
+        store.set(DiagnosticSource::Lsp, path.clone(), Vec::new());
+        assert_eq!(store.for_path(&path).len(), 2);
+        assert_eq!(store.for_path(&path)[0].source, DiagnosticSource::Compiler);
+
+        store.clear_source(DiagnosticSource::Compiler);
+        assert_eq!(store.len(), 0);
+        assert!(store.for_path(&path).is_empty());
     }
 }

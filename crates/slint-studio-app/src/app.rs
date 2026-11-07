@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use egui::{Key, KeyboardShortcut, Modifiers, TextEdit};
 use egui_dock::{DockArea, DockState};
+use slint_studio_compiler::{JobKind, JobOutcome, JobRequest, ProjectKind};
 use slint_studio_core::edit::{self, SourceEdit};
 use slint_studio_core::project as core_project;
 use slint_studio_core::text::{byte_to_char, char_to_byte};
 use slint_studio_core::{
-    ElementNode, Language, LineCol, LogBuffer, PaletteItem, PositionEncoding, ViewMode, properties,
+    DiagnosticSource, ElementNode, Language, LineCol, LogBuffer, PaletteItem, PositionEncoding,
+    ViewMode, properties,
 };
 use slint_studio_lsp::{DefinitionTarget, LspEvent, RequestId, convert};
 use tracing::{debug, error, info, warn};
@@ -23,6 +25,7 @@ use crate::layout::{self, Tab};
 use crate::logging::RepaintSignal;
 use crate::lsp::{LspManager, LspStatus};
 use crate::preview::{EDIT_DEBOUNCE, PreviewManager};
+use crate::runner::{Runner, RunnerUpdate};
 use crate::theme::{self, Palette};
 use crate::ui;
 use crate::ui::editor::{self, CompletionEntry, CompletionPopup};
@@ -62,11 +65,21 @@ pub struct AppState {
     pub unsaved: Option<GuardedAction>,
     pub preview: PreviewManager,
     pub designer: DesignerState,
+    /// How the open project is built and run.
+    pub project_kind: ProjectKind,
+    /// "Compila" / "Esegui" and the terminal output.
+    pub runner: Runner,
     commands: Vec<Command>,
 }
 
 impl AppState {
-    fn new(palette: Palette, fonts: FontChoice, log: LogBuffer, preview: PreviewManager) -> Self {
+    fn new(
+        palette: Palette,
+        fonts: FontChoice,
+        log: LogBuffer,
+        preview: PreviewManager,
+        runner: Runner,
+    ) -> Self {
         Self {
             palette,
             fonts,
@@ -82,6 +95,8 @@ impl AppState {
             unsaved: None,
             preview,
             designer: DesignerState::default(),
+            project_kind: ProjectKind::Unsupported,
+            runner,
             commands: Vec::new(),
         }
     }
@@ -137,9 +152,10 @@ impl StudioApp {
         let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(move || waker_ctx.request_repaint());
         let lsp = LspManager::new(waker.clone());
         let preview = PreviewManager::new(waker.clone());
+        let runner = Runner::new(waker.clone());
 
         let mut app = Self {
-            state: AppState::new(palette, fonts, log, preview),
+            state: AppState::new(palette, fonts, log, preview, runner),
             dock: layout::default_dock_state(),
             dock_style,
             lsp,
@@ -180,6 +196,18 @@ impl StudioApp {
             (
                 KeyboardShortcut::new(Modifiers::COMMAND, Key::W),
                 Command::CloseActiveDocument,
+            ),
+            (
+                KeyboardShortcut::new(Modifiers::COMMAND, Key::B),
+                Command::Build,
+            ),
+            (
+                KeyboardShortcut::new(Modifiers::COMMAND, Key::R),
+                Command::Run,
+            ),
+            (
+                KeyboardShortcut::new(Modifiers::SHIFT, Key::F5),
+                Command::StopRun,
             ),
         ];
         for (shortcut, command) in shortcuts {
@@ -267,6 +295,7 @@ impl StudioApp {
                         Err(err) => error!("Impossibile aggiornare l'albero dei file: {err}"),
                     }
                 }
+                self.update_project_kind();
             }
             Command::RemoveRecent(path) => {
                 self.state.workspace.recent.remove(&path);
@@ -354,13 +383,18 @@ impl StudioApp {
                 self.request_definition(&path, char_index)
             }
             Command::RestartLsp => {
-                self.state.diagnostics.clear();
+                self.state.diagnostics.clear_source(DiagnosticSource::Lsp);
                 self.lsp.restart();
             }
             Command::RefreshPreview => {
                 self.retarget_preview();
                 self.render_preview(ctx);
             }
+
+            Command::Build => self.start_job(JobKind::Build),
+            Command::Run => self.start_job(JobKind::Run),
+            Command::StopRun => self.state.runner.stop(),
+            Command::ClearTerminal => self.state.runner.clear(),
 
             Command::ResolveUnsaved(choice) => self.resolve_unsaved(ctx, choice),
         }
@@ -428,6 +462,12 @@ impl StudioApp {
         self.state.workspace.recent.touch(&root);
         self.state.workspace.save_recent();
         self.state.workspace.project = Some(project);
+        self.update_project_kind();
+        info!(
+            "Tipo di progetto: {} (Compila: {})",
+            self.state.project_kind.label(),
+            self.state.project_kind.build_description()
+        );
         layout::open(&mut self.dock, Tab::Project);
         if self.language_server {
             self.lsp.start(&root);
@@ -452,6 +492,8 @@ impl StudioApp {
         }
         self.lsp.stop();
         self.watcher = None;
+        self.state.runner.stop();
+        self.state.project_kind = ProjectKind::Unsupported;
         self.state.preview.clear();
         self.state.designer = DesignerState::default();
         let workspace = &mut self.state.workspace;
@@ -503,7 +545,9 @@ impl StudioApp {
             if let Some(client) = self.lsp.client() {
                 client.did_close(path);
             }
-            self.state.diagnostics.set(path.to_path_buf(), Vec::new());
+            self.state
+                .diagnostics
+                .set(DiagnosticSource::Lsp, path.to_path_buf(), Vec::new());
         }
     }
 
@@ -605,6 +649,11 @@ impl StudioApp {
     /// After any change to a document's text: inform the language server and
     /// re-render the preview after `delay`.
     fn document_changed(&mut self, path: &Path, delay: Duration) {
+        // Build diagnostics point into the old text: they return with the
+        // next build.
+        self.state
+            .diagnostics
+            .set(DiagnosticSource::Compiler, path.to_path_buf(), Vec::new());
         if let (Some(client), Some(open)) = (self.lsp.client(), self.state.workspace.document(path))
             && open.doc.language() == Language::Slint
         {
@@ -859,6 +908,7 @@ impl StudioApp {
                     Err(err) => error!("Impossibile aggiornare l'albero dei file: {err}"),
                 }
             }
+            self.update_project_kind();
             preview_needed |= changes.structure.iter().any(|p| is_slint(p));
         }
         for path in &changes.modified {
@@ -938,6 +988,97 @@ impl StudioApp {
         self.definition_request = client.definition(path, position);
     }
 
+    // --- Build & run ---------------------------------------------------------
+
+    fn slint_files(&self) -> Vec<PathBuf> {
+        let Some(project) = &self.state.workspace.project else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = project
+            .tree
+            .root
+            .files()
+            .into_iter()
+            .filter(|node| node.is_slint())
+            .map(|node| node.path.clone())
+            .collect();
+        files.sort();
+        files
+    }
+
+    fn update_project_kind(&mut self) {
+        self.state.project_kind = match &self.state.workspace.project {
+            Some(project) => {
+                let has_slint = project.tree.root.files().iter().any(|f| f.is_slint());
+                ProjectKind::detect(&project.root, has_slint)
+            }
+            None => ProjectKind::Unsupported,
+        };
+    }
+
+    /// "Compila" / "Esegui": saves every file (like Qt Creator), forgets the
+    /// previous build's diagnostics and starts the job.
+    fn start_job(&mut self, kind: JobKind) {
+        let Some(project) = &self.state.workspace.project else {
+            warn!("{}: nessun progetto aperto", kind.label());
+            return;
+        };
+        let root = project.root.clone();
+        let entry = project.entry_point();
+        self.update_project_kind();
+        if self.state.workspace.has_unsaved_changes() {
+            if !self.save_all() {
+                error!(
+                    "{} annullata: non è stato possibile salvare tutti i file",
+                    kind.label()
+                );
+                return;
+            }
+            info!(
+                "File modificati salvati prima della {}",
+                kind.label().to_lowercase()
+            );
+        }
+        self.state
+            .diagnostics
+            .clear_source(DiagnosticSource::Compiler);
+        let request = JobRequest {
+            kind,
+            project: self.state.project_kind.clone(),
+            root,
+            slint_files: self.slint_files(),
+            run_target: self.state.preview.target.clone().or(entry),
+            style: slint_studio_preview::DEFAULT_STYLE.to_owned(),
+        };
+        info!(
+            "{} del progetto ({})",
+            kind.label(),
+            match kind {
+                JobKind::Build => request.project.build_description(),
+                JobKind::Run => request.project.run_description(),
+            }
+        );
+        self.state.runner.start(request);
+        layout::open(&mut self.dock, Tab::Terminal);
+    }
+
+    fn process_runner_updates(&mut self) {
+        for update in self.state.runner.poll() {
+            match update {
+                RunnerUpdate::Diagnostic(diagnostic) => {
+                    self.state
+                        .diagnostics
+                        .add(DiagnosticSource::Compiler, diagnostic);
+                }
+                // Like Qt Creator's "Issues": errors are where to go next.
+                RunnerUpdate::Finished(_, JobOutcome::BuildFailed { errors }) if errors > 0 => {
+                    layout::open(&mut self.dock, Tab::Problems);
+                }
+                RunnerUpdate::Finished(..) => {}
+            }
+        }
+    }
+
     fn process_lsp_events(&mut self) {
         for event in self.lsp.poll() {
             match event {
@@ -952,7 +1093,9 @@ impl StudioApp {
                         text,
                         self.lsp.encoding(),
                     );
-                    self.state.diagnostics.set(path, converted);
+                    self.state
+                        .diagnostics
+                        .set(DiagnosticSource::Lsp, path, converted);
                 }
                 LspEvent::Completion { request, items } => {
                     for open in &mut self.state.workspace.documents {
@@ -1040,6 +1183,7 @@ impl eframe::App for StudioApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.process_lsp_events();
+        self.process_runner_updates();
         self.handle_shortcuts(&ctx);
         self.guard_window_close(&ctx);
         self.process_file_changes();
@@ -1102,7 +1246,7 @@ mod tests {
     use egui_kittest::kittest::{NodeT as _, Queryable as _};
     use egui_kittest::{Harness, Node};
     use egui_phosphor::regular as icon;
-    use slint_studio_core::{Diagnostic, DiagnosticSource, Location, Severity};
+    use slint_studio_core::{Diagnostic, Location, Severity};
     use std::fs;
 
     /// Runs frames (in real time) until no preview render is pending or in
@@ -1227,16 +1371,210 @@ mod tests {
         assert!(harness.state().state.live_preview);
     }
 
-    #[test]
-    fn unimplemented_actions_are_disabled() {
-        let harness = harness();
-        for name in [label(icon::PLAY, "Esegui"), label(icon::HAMMER, "Compila")] {
-            let node = button(&harness, &name);
-            assert!(
-                node.accesskit_node().is_disabled(),
-                "{name} should be disabled"
-            );
+    fn is_disabled(harness: &Harness<'_, StudioApp>, name: &str) -> bool {
+        button(harness, name).accesskit_node().is_disabled()
+    }
+
+    /// Whether `tab` is the visible tab of its group.
+    fn is_active(dock: &DockState<Tab>, tab: Tab) -> bool {
+        dock.find_tab(&tab).is_some_and(|path| {
+            dock.leaf(path.node_path())
+                .is_ok_and(|leaf| leaf.active == path.tab)
+        })
+    }
+
+    /// Runs frames until "Compila" / "Esegui" has finished.
+    fn wait_for_job(harness: &mut Harness<'_, StudioApp>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while harness.state().state.runner.is_running() {
+            harness.step();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            assert!(std::time::Instant::now() < deadline, "the job did not end");
         }
+        settle(harness);
+    }
+
+    fn terminal_text(harness: &Harness<'_, StudioApp>) -> String {
+        harness.state().state.runner.terminal.plain_text()
+    }
+
+    #[test]
+    fn run_actions_need_a_supported_project() {
+        let run = label(icon::PLAY, "Esegui");
+        let build = label(icon::HAMMER, "Compila");
+        let stop = label(icon::STOP, "Interrompi");
+        let harness = harness();
+        for name in [&run, &build, &stop] {
+            assert!(is_disabled(&harness, name), "{name} should be disabled");
+        }
+
+        let dir = project_dir();
+        let harness = with_project(&dir);
+        assert_eq!(harness.state().state.project_kind, ProjectKind::Slint);
+        assert!(!is_disabled(&harness, &run));
+        assert!(!is_disabled(&harness, &build));
+        assert!(is_disabled(&harness, &stop), "nothing is running");
+
+        let empty = tempfile::tempdir().unwrap();
+        fs::write(empty.path().join("note.txt"), "x").unwrap();
+        let harness = with_project(&empty);
+        assert_eq!(harness.state().state.project_kind, ProjectKind::Unsupported);
+        assert!(is_disabled(&harness, &run));
+    }
+
+    #[test]
+    fn cargo_projects_are_detected() {
+        let dir = project_dir();
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        let harness = with_project(&dir);
+        let root = harness
+            .state()
+            .state
+            .workspace
+            .project
+            .as_ref()
+            .unwrap()
+            .root
+            .clone();
+        assert_eq!(
+            harness.state().state.project_kind,
+            ProjectKind::Cargo {
+                manifest: root.join("Cargo.toml")
+            }
+        );
+    }
+
+    #[test]
+    fn build_saves_checks_slint_files_and_shows_errors() {
+        let dir = project_dir();
+        fs::write(
+            dir.path().join("ui/card.slint"),
+            "export component Card inherits Rectangle { Buton {} }\n",
+        )
+        .unwrap();
+        let mut harness = with_project(&dir);
+        let main = harness
+            .state()
+            .state
+            .workspace
+            .active_document()
+            .unwrap()
+            .doc
+            .path()
+            .to_path_buf();
+        let edited =
+            "export component Main inherits Window {\n    Text { text: \"Salvato\"; }\n}\n";
+        {
+            let doc = &mut harness
+                .state_mut()
+                .state
+                .workspace
+                .document_mut(&main)
+                .unwrap()
+                .doc;
+            doc.set_text(edited.to_owned());
+        }
+        send(&mut harness, Command::DocumentEdited(main.clone()));
+
+        button(&harness, &label(icon::HAMMER, "Compila")).click();
+        harness.step();
+        assert!(is_active(&harness.state().dock, Tab::Terminal));
+        wait_for_job(&mut harness);
+
+        let state = &harness.state().state;
+        assert!(
+            !state.workspace.has_unsaved_changes(),
+            "saved before building"
+        );
+        assert_eq!(fs::read_to_string(&main).unwrap(), edited);
+        let text = terminal_text(&harness);
+        assert!(text.contains("Controllo di 2 file .slint"), "{text}");
+        assert!(text.contains("errore: Unknown element 'Buton'"), "{text}");
+        assert!(state.runner.status.is_failure());
+
+        let card = main.parent().unwrap().join("card.slint");
+        let errors: Vec<_> = state
+            .diagnostics
+            .all()
+            .into_iter()
+            .filter(|d| d.source == DiagnosticSource::Compiler)
+            .cloned()
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].location.as_ref().unwrap().path, card);
+        assert!(
+            is_active(&harness.state().dock, Tab::Problems),
+            "build errors open the Errori panel"
+        );
+
+        // Editing the file makes its build diagnostics stale.
+        send(&mut harness, Command::OpenFile(card.clone()));
+        {
+            let doc = &mut harness
+                .state_mut()
+                .state
+                .workspace
+                .document_mut(&card)
+                .unwrap()
+                .doc;
+            doc.set_text("export component Card inherits Rectangle { }\n".to_owned());
+        }
+        send(&mut harness, Command::DocumentEdited(card.clone()));
+        assert!(harness.state().state.diagnostics.for_path(&card).is_empty());
+
+        // Ctrl+B builds again: everything is fine now.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::B);
+        harness.step();
+        wait_for_job(&mut harness);
+        let state = &harness.state().state;
+        assert!(!state.runner.status.is_failure());
+        assert_eq!(state.diagnostics.counts().errors, 0);
+        assert!(terminal_text(&harness).contains("■ Compilazione riuscita"));
+        assert_eq!(
+            fs::read_to_string(&card).unwrap(),
+            "export component Card inherits Rectangle { }\n"
+        );
+    }
+
+    #[test]
+    fn run_does_not_start_when_the_previewed_file_has_errors() {
+        let dir = project_dir();
+        fs::write(
+            dir.path().join("ui/main.slint"),
+            "export component Main inherits Window { Buton {} }\n",
+        )
+        .unwrap();
+        let mut harness = with_project(&dir);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::R);
+        harness.step();
+        wait_for_job(&mut harness);
+        let text = terminal_text(&harness);
+        assert!(text.contains("▶ Controllo di ui/main.slint"), "{text}");
+        assert!(
+            !text.contains("slint-viewer"),
+            "the viewer must not start: {text}"
+        );
+        assert_eq!(harness.state().state.diagnostics.counts().errors, 1);
+        assert!(harness.state().state.runner.status.is_failure());
+    }
+
+    #[test]
+    fn terminal_panel_can_be_cleared() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        send(&mut harness, Command::Build);
+        wait_for_job(&mut harness);
+        assert!(!harness.state().state.runner.terminal.is_empty());
+        harness
+            .get_by_role_and_label(Role::Button, &label(icon::BROOM, "Pulisci"))
+            .click();
+        settle(&mut harness);
+        assert!(harness.state().state.runner.terminal.is_empty());
+        assert_eq!(
+            harness.state().state.runner.status,
+            crate::runner::RunnerStatus::Idle
+        );
+        harness.get_by_label("Nessun output");
     }
 
     #[test]
@@ -1274,6 +1612,7 @@ mod tests {
             .root
             .join("ui/card.slint");
         harness.state_mut().state.diagnostics.set(
+            DiagnosticSource::Lsp,
             card.clone(),
             vec![Diagnostic {
                 severity: Severity::Error,

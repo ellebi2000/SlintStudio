@@ -46,7 +46,7 @@ impl TabViewer for StudioTabViewer<'_> {
             Tab::Properties => inspector::properties(ui, state),
             Tab::Output => output::log(ui, state),
             Tab::Problems => output::problems(ui, state),
-            Tab::Terminal => output::terminal(ui),
+            Tab::Terminal => output::terminal(ui, state),
         }
     }
 
