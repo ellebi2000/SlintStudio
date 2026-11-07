@@ -6,6 +6,23 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+slint-studio-core.workspace = true
+
+directories.workspace = true
+flate2.workspace = true
+lsp-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+url.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
