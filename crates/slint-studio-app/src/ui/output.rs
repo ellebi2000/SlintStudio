@@ -10,6 +10,7 @@ use slint_studio_core::{LogBuffer, LogEntry, LogLevel, Severity};
 
 use super::{empty_state, ico, padded, with_icon};
 use crate::app::AppState;
+use crate::commands::Command;
 use crate::theme::Palette;
 
 /// UI-side cache of the log buffer, refreshed only when it changes.
@@ -104,8 +105,8 @@ fn log_line(ui: &Ui, entry: &LogEntry, palette: &Palette) -> LayoutJob {
     job
 }
 
-pub fn problems(ui: &mut Ui, state: &AppState) {
-    if state.diagnostics.is_empty() {
+pub fn problems(ui: &mut Ui, state: &mut AppState) {
+    if state.diagnostics.len() == 0 {
         padded(ui, |ui| {
             empty_state(
                 ui,
@@ -118,12 +119,16 @@ pub fn problems(ui: &mut Ui, state: &AppState) {
     }
 
     let palette = state.palette;
+    let diagnostics = state.diagnostics.all();
+    let project = state.workspace.project.as_ref();
+    let mut open = None;
     egui::Frame::NONE
         .inner_margin(Margin::same(6))
         .show(ui, |ui| {
             TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)
+                .sense(egui::Sense::click())
                 .cell_layout(Layout::left_to_right(Align::Center))
                 .column(Column::exact(24.0))
                 .column(Column::initial(460.0).at_least(160.0).clip(true))
@@ -138,8 +143,8 @@ pub fn problems(ui: &mut Ui, state: &AppState) {
                     }
                 })
                 .body(|body| {
-                    body.rows(20.0, state.diagnostics.len(), |mut row| {
-                        let Some(diagnostic) = state.diagnostics.get(row.index()) else {
+                    body.rows(20.0, diagnostics.len(), |mut row| {
+                        let Some(diagnostic) = diagnostics.get(row.index()).copied() else {
                             return;
                         };
                         let (glyph, color) = severity_glyph(diagnostic.severity, &palette);
@@ -148,21 +153,44 @@ pub fn problems(ui: &mut Ui, state: &AppState) {
                                 .on_hover_text(diagnostic.severity.label());
                         });
                         row.col(|ui| {
-                            ui.label(&diagnostic.message);
+                            ui.add(egui::Label::new(&diagnostic.message).selectable(false));
                         });
                         row.col(|ui| {
-                            let location = diagnostic
-                                .location
-                                .as_ref()
-                                .map_or_else(|| "—".to_owned(), ToString::to_string);
-                            ui.label(RichText::new(location).weak());
+                            let location = diagnostic.location.as_ref().map_or_else(
+                                || "—".to_owned(),
+                                |l| {
+                                    let path =
+                                        project.map_or(l.path.as_path(), |p| p.relative(&l.path));
+                                    format!(
+                                        "{}:{}:{}",
+                                        path.display(),
+                                        l.start.line + 1,
+                                        l.start.column + 1
+                                    )
+                                },
+                            );
+                            ui.add(
+                                egui::Label::new(RichText::new(location).weak()).selectable(false),
+                            );
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(diagnostic.source.label()).weak());
+                            ui.add(
+                                egui::Label::new(RichText::new(diagnostic.source.label()).weak())
+                                    .selectable(false),
+                            );
                         });
+                        if row.response().clicked() {
+                            open = diagnostic.location.clone();
+                        }
                     });
                 });
         });
+    if let Some(location) = open {
+        state.send(Command::OpenLocation {
+            path: location.path,
+            position: location.start,
+        });
+    }
 }
 
 fn severity_glyph(severity: Severity, palette: &Palette) -> (&'static str, Color32) {

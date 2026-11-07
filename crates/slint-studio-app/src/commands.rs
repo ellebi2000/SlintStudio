@@ -1,24 +1,83 @@
 //! User-level commands.
 //!
-//! Menus, the toolbar and (from Phase 5) keyboard shortcuts and the command
-//! palette never mutate application state directly: they enqueue a
-//! [`Command`], which the app executes once per frame after the UI pass.
-//! This keeps the borrow of the dock layout simple and gives a single place
+//! Menus, the toolbar, keyboard shortcuts and widgets never mutate application
+//! state directly: they enqueue a [`Command`], which the app executes once per
+//! frame after the UI pass. This keeps borrows simple (the dock layout and the
+//! language server are owned outside the UI state) and gives a single place
 //! where every action is implemented and logged.
 
-use slint_studio_core::ViewMode;
+use std::path::PathBuf;
+
+use slint_studio_core::{LineCol, ViewMode};
 
 use crate::layout::Tab;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     SetViewMode(ViewMode),
     ToggleLivePreview,
     TogglePanel(Tab),
+    ShowPanel(Tab),
     ResetLayout,
     ShowAbout,
     OpenSlintDocs,
     Quit,
+
+    // Project
+    OpenFolderDialog,
+    OpenProject(PathBuf),
+    CloseProject,
+    RefreshTree,
+    RemoveRecent(PathBuf),
+    RunSearch,
+
+    // Documents
+    OpenFile(PathBuf),
+    /// Opens a file and moves the cursor to `position` (0-based, columns in
+    /// characters).
+    OpenLocation {
+        path: PathBuf,
+        position: LineCol,
+    },
+    ActivateDocument(PathBuf),
+    CloseDocument(PathBuf),
+    CloseActiveDocument,
+    Save,
+    SaveAll,
+    Undo,
+    Redo,
+    /// The buffer of an open document changed (sent by the editor).
+    DocumentEdited(PathBuf),
+
+    // Language server
+    RequestCompletion {
+        path: PathBuf,
+        char_index: usize,
+    },
+    RequestDefinition {
+        path: PathBuf,
+        char_index: usize,
+    },
+    RestartLsp,
+
+    /// Answer to the "unsaved changes" dialog.
+    ResolveUnsaved(UnsavedChoice),
+}
+
+/// An action that would discard unsaved changes and needs confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedAction {
+    CloseDocument(PathBuf),
+    CloseProject,
+    OpenProject(PathBuf),
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsavedChoice {
+    Save,
+    Discard,
+    Cancel,
 }
 
 /// A feature shown in the UI but implemented in a later phase. Used to render

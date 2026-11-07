@@ -1,91 +1,96 @@
 //! Central workspace: code editor, design canvas, or both (split).
 //!
-//! Phase 0 renders the surfaces only; the editor arrives in Phase 1 and the
-//! rendered preview in Phase 2.
+//! The rendered preview arrives in Phase 2; until then the canvas is a
+//! placeholder.
 
-use egui::{Align2, Color32, FontId, Margin, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, vec2};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, vec2};
 use egui_phosphor::regular as icon;
 use slint_studio_core::ViewMode;
 
-use super::icon_label;
+use super::editor;
 use crate::app::AppState;
 use crate::fonts;
 use crate::theme::Palette;
 
 const CANVAS_BG: Color32 = Color32::from_rgb(0x18, 0x18, 0x18);
 const CANVAS_DOT: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
-const GUTTER_LINE: Color32 = Color32::from_rgb(0x2B, 0x2B, 0x2B);
-const GUTTER_WIDTH: f32 = 52.0;
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
     match state.view_mode {
-        ViewMode::Code => editor(ui, state),
+        ViewMode::Code => editor_area(ui, state),
         ViewMode::Design => canvas(ui, state),
         ViewMode::Split => {
             let height = ui.available_height();
             let min = 100.0_f32.min(height / 2.0);
             egui::Panel::top("workspace_split_editor")
                 .resizable(true)
-                .default_size(height * 0.55)
+                .default_size(height * 0.6)
                 .size_range(min..=(height - min).max(min))
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| editor(ui, state));
+                .show(ui, |ui| editor_area(ui, state));
             egui::CentralPanel::no_frame().show(ui, |ui| canvas(ui, state));
         }
     }
 }
 
-fn editor(ui: &mut Ui, state: &AppState) {
+fn editor_area(ui: &mut Ui, state: &mut AppState) {
     let palette = state.palette;
+    let mut commands = Vec::new();
+    if state.workspace.documents.is_empty() {
+        watermark(ui, state);
+        return;
+    }
+    editor::document_tabs(ui, &state.workspace, &palette, &mut commands);
 
-    // Breadcrumb strip (filled with the path of the open file from Phase 1).
-    egui::Frame::NONE
-        .fill(palette.background)
-        .inner_margin(Margin::symmetric(12, 4))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let weak = ui.visuals().weak_text_color();
-            icon_label(
-                ui,
-                icon::FILE_CODE,
-                RichText::new("Nessun file aperto").small().color(weak),
-            );
-        });
+    let workspace = &mut state.workspace;
+    let project = workspace.project.as_ref();
+    if let Some(document) = workspace
+        .active
+        .and_then(|i| workspace.documents.get_mut(i))
+    {
+        let diagnostics = state.diagnostics.for_path(document.doc.path());
+        editor::show(ui, document, diagnostics, project, &palette, &mut commands);
+    }
+    for command in commands {
+        state.send(command);
+    }
+}
 
+fn watermark(ui: &mut Ui, state: &AppState) {
+    let palette = state.palette;
     let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, palette.background);
-    painter.vline(
-        rect.left() + GUTTER_WIDTH,
-        rect.y_range(),
-        Stroke::new(1.0, GUTTER_LINE),
-    );
-
-    let text_area = Rect::from_min_max(Pos2::new(rect.left() + GUTTER_WIDTH, rect.top()), rect.max);
-    if text_area.height() > 110.0 && text_area.width() > 280.0 {
-        let center = text_area.center();
-        painter.text(
-            center - vec2(0.0, 30.0),
-            Align2::CENTER_CENTER,
-            "Slint Studio",
-            FontId::proportional(28.0),
-            palette.text_weak.gamma_multiply(0.45),
-        );
-        painter.text(
-            center + vec2(0.0, 6.0),
-            Align2::CENTER_CENTER,
-            "Editor .slint con evidenziazione della sintassi e language server",
-            FontId::proportional(13.0),
-            palette.text_weak,
-        );
-        painter.text(
-            center + vec2(0.0, 28.0),
-            Align2::CENTER_CENTER,
-            "Apri una cartella progetto per iniziare · disponibile dalla Fase 1",
-            FontId::proportional(12.0),
-            palette.text_weak.gamma_multiply(0.7),
-        );
+    if rect.height() < 110.0 || rect.width() < 280.0 {
+        return;
     }
+    let hint = if state.workspace.project.is_some() {
+        "Apri un file dall'albero del progetto"
+    } else {
+        "Apri una cartella progetto: File › Apri cartella… (Ctrl+O)"
+    };
+    let center = rect.center();
+    painter.text(
+        center - vec2(0.0, 30.0),
+        Align2::CENTER_CENTER,
+        "Slint Studio",
+        FontId::proportional(28.0),
+        palette.text_weak.gamma_multiply(0.45),
+    );
+    painter.text(
+        center + vec2(0.0, 6.0),
+        Align2::CENTER_CENTER,
+        hint,
+        FontId::proportional(13.0),
+        palette.text_weak,
+    );
+    painter.text(
+        center + vec2(0.0, 28.0),
+        Align2::CENTER_CENTER,
+        "Ctrl+S salva · Ctrl+Space completamento · F12 vai alla definizione",
+        FontId::proportional(12.0),
+        palette.text_weak.gamma_multiply(0.7),
+    );
 }
 
 fn canvas(ui: &mut Ui, state: &AppState) {

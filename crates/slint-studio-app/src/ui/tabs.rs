@@ -41,7 +41,7 @@ impl TabViewer for StudioTabViewer<'_> {
             Tab::Workspace => workspace::show(ui, state),
             Tab::Project => explorer::project(ui, state),
             Tab::Search => explorer::search(ui, state),
-            Tab::Recent => explorer::recent(ui),
+            Tab::Recent => explorer::recent(ui, state),
             Tab::Components => inspector::components(ui, state),
             Tab::Properties => inspector::properties(ui, state),
             Tab::Output => output::log(ui, state),
