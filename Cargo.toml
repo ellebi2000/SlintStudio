@@ -38,8 +38,10 @@ sha2 = "0.11"
 directories = "6"
 
 # Live preview. Pinned to the same Slint version as the managed slint-lsp.
+# `internal-highlight` (element geometry for the designer) is not a stable
+# Slint API: it is used only in slint-studio-preview/src/geometry.rs.
 slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
-slint-interpreter = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "image-default-formats"] }
+slint-interpreter = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "image-default-formats", "internal-highlight"] }
 image = { version = "0.25", default-features = false }
 notify = "8"
 
@@ -69,5 +71,8 @@ dbg_macro = "warn"
 todo = "warn"
 
 # Keep debug builds of the UI responsive: optimise dependencies, not our crates.
+# Dependencies carry no debug info, which keeps `target/` several times smaller
+# (Slint is large); our own crates keep full debug info.
 [profile.dev.package."*"]
 opt-level = 2
+debug = false

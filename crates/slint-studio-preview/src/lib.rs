@@ -9,6 +9,7 @@
 //! - [`Previewer`]: reusable renderer bound to the current thread.
 //! - [`PreviewService`]: renders on a dedicated thread, for UIs.
 
+mod geometry;
 mod renderer;
 mod service;
 mod window;
@@ -16,6 +17,7 @@ mod window;
 use std::cell::RefCell;
 use std::path::Path;
 
+pub use geometry::{ElementGeometry, ElementRect, hit_test};
 pub use image::RgbaImage;
 pub use renderer::{
     DEFAULT_SIZE, DEFAULT_STYLE, MAX_SIZE, PreviewError, PreviewRequest, Previewer, RenderedPreview,

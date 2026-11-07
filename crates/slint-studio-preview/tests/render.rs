@@ -181,3 +181,60 @@ fn service_renders_on_its_own_thread_and_coalesces() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn element_geometry_follows_layouts_and_repetitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "geometry.slint",
+        "export component T inherits Window {
+            width: 200px;
+            height: 100px;
+            Rectangle { x: 10px; y: 20px; width: 50px; height: 30px; background: red; }
+            VerticalLayout {
+                x: 100px;
+                width: 100px;
+                padding: 10px;
+                for i in 3 : Rectangle { height: 20px; }
+            }
+        }",
+    );
+    let preview = Previewer::new()
+        .unwrap()
+        .render(&PreviewRequest::new(&path))
+        .unwrap();
+    let find = |tree_path: &[usize]| {
+        preview
+            .elements
+            .iter()
+            .find(|e| e.tree_path == tree_path)
+            .unwrap_or_else(|| panic!("no geometry for {tree_path:?}: {:?}", preview.elements))
+    };
+
+    let root = find(&[0]).rects[0];
+    assert_eq!(
+        (root.x, root.y, root.width, root.height),
+        (0.0, 0.0, 200.0, 100.0)
+    );
+
+    let rect = find(&[0, 0]).rects[0];
+    assert_eq!(
+        (rect.x, rect.y, rect.width, rect.height),
+        (10.0, 20.0, 50.0, 30.0)
+    );
+    assert_eq!((rect.local_x, rect.local_y), (10.0, 20.0));
+
+    let layout = find(&[0, 1]).rects[0];
+    assert_eq!((layout.x, layout.width), (100.0, 100.0));
+
+    let repeated = &find(&[0, 1, 0]).rects;
+    assert_eq!(repeated.len(), 3, "one rectangle per repetition");
+    assert!(
+        repeated.iter().all(|r| r.x == 110.0 && r.width == 80.0),
+        "{repeated:?}"
+    );
+
+    let hit = slint_studio_preview::hit_test(&preview.elements, 30.0, 30.0).unwrap();
+    assert_eq!(hit.tree_path, [0, 0]);
+}

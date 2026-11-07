@@ -19,6 +19,7 @@ use slint_studio_core::{
     Diagnostic, DiagnosticSource, LineCol, LineIndex, Location, PositionEncoding, Severity,
 };
 
+use crate::geometry::{self, ElementGeometry};
 use crate::window::{PreviewPlatform, take_created_windows};
 
 /// Size used when the component has no preferred size (e.g. an empty
@@ -69,6 +70,8 @@ pub struct RenderedPreview {
     pub scale_factor: f32,
     /// Non-fatal compiler diagnostics.
     pub warnings: Vec<Diagnostic>,
+    /// Where each element of the file was drawn, for the designer.
+    pub elements: Vec<ElementGeometry>,
     pub duration: Duration,
 }
 
@@ -143,7 +146,7 @@ impl Previewer {
                 Box::pin(async move { text.map(Ok) })
             });
         }
-        let result = block_on(compiler.build_from_source(source, request.path.clone()))
+        let result = block_on(compiler.build_from_source(source.clone(), request.path.clone()))
             .ok_or_else(|| PreviewError::Internal("la compilazione non è terminata".into()))?;
 
         let text_of =
@@ -203,6 +206,7 @@ impl Previewer {
         window
             .software_renderer()
             .render(&mut pixels, width as usize);
+        let elements = geometry::collect(&instance, &request.path, &source);
         // Hiding fails only if the platform refuses; nothing to clean up then.
         let _ = instance.hide();
 
@@ -213,6 +217,7 @@ impl Previewer {
             logical_size: logical,
             scale_factor,
             warnings: diagnostics,
+            elements,
             duration: start.elapsed(),
         })
     }
