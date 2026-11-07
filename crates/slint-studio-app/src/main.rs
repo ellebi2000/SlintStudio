@@ -6,8 +6,10 @@ mod fonts;
 mod layout;
 mod logging;
 mod lsp;
+mod preview;
 mod theme;
 mod ui;
+mod watcher;
 mod workspace;
 
 use std::path::PathBuf;

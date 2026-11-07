@@ -59,6 +59,8 @@ pub enum Command {
         char_index: usize,
     },
     RestartLsp,
+    /// Re-renders the preview now, even with live preview off.
+    RefreshPreview,
 
     /// Answer to the "unsaved changes" dialog.
     ResolveUnsaved(UnsavedChoice),

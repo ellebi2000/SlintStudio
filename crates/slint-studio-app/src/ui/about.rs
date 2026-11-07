@@ -31,7 +31,16 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                     ui.label("egui / eframe");
                     ui.end_row();
                     ui.label(RichText::new("Anteprima").weak());
-                    ui.label("slint-interpreter (dalla Fase 2)");
+                    ui.label("slint-interpreter 1.18.1 (renderer software)");
+                    ui.end_row();
+                    ui.label(RichText::new("Language server").weak());
+                    ui.label(format!(
+                        "slint-lsp {}",
+                        slint_studio_lsp::install::SLINT_LSP_VERSION
+                    ));
+                    ui.end_row();
+                    ui.label(RichText::new("Licenza").weak());
+                    ui.label("GNU GPLv3");
                     ui.end_row();
                     ui.label(RichText::new("Font interfaccia").weak());
                     ui.label(state.fonts.ui.as_deref().unwrap_or("predefinito egui"));
@@ -48,7 +57,20 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 });
             ui.separator();
             ui.vertical_centered(|ui| {
-                ui.hyperlink_to("Documentazione di Slint", "https://docs.slint.dev");
+                ui.label(
+                    RichText::new(
+                        "Slint Studio è software libero distribuito sotto GPLv3.\n\
+                         Usa Slint di SixtyFPS GmbH, sotto licenza GPLv3.",
+                    )
+                    .small(),
+                );
+                ui.horizontal(|ui| {
+                    ui.hyperlink_to("Slint", "https://slint.dev");
+                    ui.label("·");
+                    ui.hyperlink_to("Documentazione", "https://docs.slint.dev");
+                    ui.label("·");
+                    ui.hyperlink_to("GPLv3", "https://www.gnu.org/licenses/gpl-3.0.html");
+                });
             });
         });
     state.show_about = open;

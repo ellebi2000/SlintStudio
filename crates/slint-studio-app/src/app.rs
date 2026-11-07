@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use egui::{Key, KeyboardShortcut, Modifiers, TextEdit};
 use egui_dock::{DockArea, DockState};
@@ -10,17 +11,19 @@ use slint_studio_core::project as core_project;
 use slint_studio_core::text::{byte_to_char, char_to_byte};
 use slint_studio_core::{Language, LineCol, LogBuffer, PositionEncoding, ViewMode};
 use slint_studio_lsp::{DefinitionTarget, LspEvent, RequestId, convert};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::commands::{Command, GuardedAction, UnsavedChoice};
 use crate::fonts::{self, FontChoice};
 use crate::layout::{self, Tab};
 use crate::logging::RepaintSignal;
 use crate::lsp::{LspManager, LspStatus};
+use crate::preview::{EDIT_DEBOUNCE, PreviewManager};
 use crate::theme::{self, Palette};
 use crate::ui;
 use crate::ui::editor::{self, CompletionEntry, CompletionPopup};
 use crate::ui::explorer::ExplorerState;
+use crate::watcher::{FileWatcher, is_slint};
 use crate::workspace::{DiagnosticStore, Project, Workspace};
 
 const SLINT_DOCS_URL: &str = "https://docs.slint.dev";
@@ -53,11 +56,12 @@ pub struct AppState {
     pub show_about: bool,
     /// Action waiting for the "unsaved changes" dialog.
     pub unsaved: Option<GuardedAction>,
+    pub preview: PreviewManager,
     commands: Vec<Command>,
 }
 
 impl AppState {
-    fn new(palette: Palette, fonts: FontChoice, log: LogBuffer) -> Self {
+    fn new(palette: Palette, fonts: FontChoice, log: LogBuffer, preview: PreviewManager) -> Self {
         Self {
             palette,
             fonts,
@@ -71,6 +75,7 @@ impl AppState {
             lsp_status: LspStatus::Idle,
             show_about: false,
             unsaved: None,
+            preview,
             commands: Vec::new(),
         }
     }
@@ -91,6 +96,12 @@ pub struct StudioApp {
     definition_request: Option<RequestId>,
     /// Set once quitting was confirmed despite unsaved changes.
     allow_close: bool,
+    /// Watches the open project for changes made outside the editor.
+    watcher: Option<FileWatcher>,
+    /// Wakes the UI from background threads.
+    waker: Arc<dyn Fn() + Send + Sync>,
+    /// Scale factor the preview was rendered for.
+    pixels_per_point: f32,
 }
 
 impl StudioApp {
@@ -117,16 +128,21 @@ impl StudioApp {
 
         let dock_style = theme::dock_style(&ctx.style_of(egui::Theme::Dark), &palette);
         let waker_ctx = ctx.clone();
-        let lsp = LspManager::new(Arc::new(move || waker_ctx.request_repaint()));
+        let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(move || waker_ctx.request_repaint());
+        let lsp = LspManager::new(waker.clone());
+        let preview = PreviewManager::new(waker.clone());
 
         let mut app = Self {
-            state: AppState::new(palette, fonts, log),
+            state: AppState::new(palette, fonts, log, preview),
             dock: layout::default_dock_state(),
             dock_style,
             lsp,
             language_server: options.language_server,
             definition_request: None,
             allow_close: false,
+            watcher: None,
+            waker,
+            pixels_per_point: ctx.pixels_per_point(),
         };
         if let Some(project) = options.project {
             app.state.send(Command::OpenProject(project));
@@ -209,6 +225,9 @@ impl StudioApp {
                     "disattivata"
                 };
                 info!("Anteprima live {status}");
+                if self.state.live_preview {
+                    self.state.preview.schedule(Duration::ZERO);
+                }
             }
             Command::TogglePanel(tab) => layout::toggle(&mut self.dock, tab),
             Command::ShowPanel(tab) => {
@@ -298,6 +317,9 @@ impl StudioApp {
                 {
                     client.did_change(&path, open.doc.text(), open.doc.version());
                 }
+                if self.state.live_preview && is_slint(&path) {
+                    self.state.preview.schedule(EDIT_DEBOUNCE);
+                }
             }
 
             Command::RequestCompletion { path, char_index } => {
@@ -309,6 +331,10 @@ impl StudioApp {
             Command::RestartLsp => {
                 self.state.diagnostics.clear();
                 self.lsp.restart();
+            }
+            Command::RefreshPreview => {
+                self.retarget_preview();
+                self.render_preview(ctx);
             }
 
             Command::ResolveUnsaved(choice) => self.resolve_unsaved(ctx, choice),
@@ -381,6 +407,15 @@ impl StudioApp {
         if self.language_server {
             self.lsp.start(&root);
         }
+        if let Some(project) = &self.state.workspace.project {
+            match FileWatcher::new(&project.tree.root, self.waker.clone()) {
+                Ok(watcher) => {
+                    debug!("{} cartelle osservate", watcher.watched_count());
+                    self.watcher = Some(watcher);
+                }
+                Err(err) => error!("Impossibile osservare le modifiche ai file: {err}"),
+            }
+        }
         if let Some(entry) = entry {
             self.open_file(&entry);
         }
@@ -391,6 +426,8 @@ impl StudioApp {
             return;
         }
         self.lsp.stop();
+        self.watcher = None;
+        self.state.preview.clear();
         let workspace = &mut self.state.workspace;
         workspace.documents.clear();
         workspace.active = None;
@@ -535,6 +572,111 @@ impl StudioApp {
         );
         self.state.explorer.results = Some(results);
         layout::open(&mut self.dock, Tab::Search);
+    }
+
+    // --- Live preview and file watching ---------------------------------------
+
+    /// Previews the active document when it is a `.slint` file.
+    fn retarget_preview(&mut self) {
+        let Some(open) = self.state.workspace.active_document() else {
+            return;
+        };
+        if open.doc.language() != Language::Slint || self.state.preview.previews(open.doc.path()) {
+            return;
+        }
+        self.state.preview.target = Some(open.doc.path().to_path_buf());
+        if self.state.live_preview {
+            self.state.preview.schedule(Duration::ZERO);
+        }
+    }
+
+    /// Sends the preview request, with the unsaved buffers.
+    fn render_preview(&mut self, ctx: &egui::Context) {
+        let overrides = self
+            .state
+            .workspace
+            .documents
+            .iter()
+            .filter(|d| d.doc.is_dirty() && d.doc.language() == Language::Slint)
+            .map(|d| (d.doc.path().to_path_buf(), d.doc.text().to_owned()))
+            .collect();
+        self.pixels_per_point = ctx.pixels_per_point();
+        self.state
+            .preview
+            .render_now(overrides, self.pixels_per_point);
+    }
+
+    /// Applies finished renders and starts due ones (debounced).
+    fn update_preview(&mut self, ctx: &egui::Context) {
+        self.state.preview.poll(ctx);
+        self.retarget_preview();
+        let moved_to_other_screen = (ctx.pixels_per_point() - self.pixels_per_point).abs() > 0.01;
+        if moved_to_other_screen && self.state.preview.image.is_some() {
+            self.state.preview.schedule(Duration::ZERO);
+        }
+        if self.state.preview.is_due() {
+            self.render_preview(ctx);
+        } else if let Some(wait) = self.state.preview.time_until_due() {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
+    /// Reacts to changes made outside the editor: refreshes the tree,
+    /// reloads unmodified documents and updates the preview.
+    fn process_file_changes(&mut self) {
+        let Some(changes) = self.watcher.as_ref().map(FileWatcher::poll) else {
+            return;
+        };
+        if changes.is_empty() {
+            return;
+        }
+        let mut preview_needed = false;
+        if !changes.structure.is_empty() {
+            if let Some(project) = &mut self.state.workspace.project {
+                match project.refresh() {
+                    Ok(()) => {
+                        if let Some(watcher) = &mut self.watcher {
+                            watcher.sync(&project.tree.root);
+                        }
+                    }
+                    Err(err) => error!("Impossibile aggiornare l'albero dei file: {err}"),
+                }
+            }
+            preview_needed |= changes.structure.iter().any(|p| is_slint(p));
+        }
+        for path in &changes.modified {
+            let Some(open) = self.state.workspace.document_mut(path) else {
+                // Not open: may be imported by the previewed file.
+                preview_needed |= is_slint(path);
+                continue;
+            };
+            if open.doc.is_dirty() {
+                warn!(
+                    "{} è stato modificato fuori dall'editor: le modifiche non salvate sono state mantenute",
+                    open.doc.file_name()
+                );
+                continue;
+            }
+            match open.doc.reload() {
+                Ok(true) => {
+                    info!(
+                        "{} ricaricato: modificato fuori dall'editor",
+                        open.doc.file_name()
+                    );
+                    if open.doc.language() == Language::Slint {
+                        preview_needed = true;
+                        if let Some(client) = self.lsp.client() {
+                            client.did_change(path, open.doc.text(), open.doc.version());
+                        }
+                    }
+                }
+                Ok(false) => {} // e.g. our own save
+                Err(err) => warn!("Impossibile ricaricare {}: {err}", path.display()),
+            }
+        }
+        if preview_needed && self.state.live_preview {
+            self.state.preview.schedule(EDIT_DEBOUNCE);
+        }
     }
 
     // --- Language server ----------------------------------------------------
@@ -683,6 +825,8 @@ impl eframe::App for StudioApp {
         self.process_lsp_events();
         self.handle_shortcuts(&ctx);
         self.guard_window_close(&ctx);
+        self.process_file_changes();
+        self.update_preview(&ctx);
         let palette = self.state.palette;
 
         egui::Panel::top("menu_bar")
@@ -742,13 +886,36 @@ mod tests {
     use slint_studio_core::{Diagnostic, DiagnosticSource, Location, Severity};
     use std::fs;
 
+    /// Runs frames (in real time) until no preview render is pending or in
+    /// flight: opening a project renders in the background.
+    fn settle(harness: &mut Harness<'_, StudioApp>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        // Commands run at the end of a frame and the preview reacts on the
+        // next one, so require a few idle frames in a row.
+        let mut idle_frames = 0;
+        while idle_frames < 3 {
+            harness.step();
+            let preview = &harness.state().state.preview;
+            if !preview.is_rendering() && preview.time_until_due().is_none() {
+                idle_frames += 1;
+            } else {
+                idle_frames = 0;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the preview did not settle"
+            );
+        }
+    }
+
     fn harness_with(options: StartupOptions) -> Harness<'static, StudioApp> {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1400.0, 900.0))
             .build_eframe(move |cc| {
                 StudioApp::new(cc, LogBuffer::default(), RepaintSignal::default(), options)
             });
-        harness.run();
+        settle(&mut harness);
         harness
     }
 
@@ -761,7 +928,7 @@ mod tests {
             project: Some(dir.path().to_path_buf()),
             language_server: false,
         });
-        harness.run();
+        settle(&mut harness);
         harness
     }
 
@@ -793,7 +960,7 @@ mod tests {
 
     fn send(harness: &mut Harness<'_, StudioApp>, command: Command) {
         harness.state_mut().state.send(command);
-        harness.run();
+        settle(harness);
     }
 
     #[test]
@@ -824,7 +991,7 @@ mod tests {
         assert_eq!(harness.state().state.view_mode, ViewMode::Split);
         for mode in [ViewMode::Code, ViewMode::Design, ViewMode::Split] {
             button(&harness, &mode_label(mode)).click();
-            harness.run();
+            settle(&mut harness);
             assert_eq!(harness.state().state.view_mode, mode);
         }
     }
@@ -834,10 +1001,10 @@ mod tests {
         let mut harness = harness();
         assert!(harness.state().state.live_preview);
         button(&harness, &label(icon::EYE, "Anteprima live")).click();
-        harness.run();
+        settle(&mut harness);
         assert!(!harness.state().state.live_preview);
         button(&harness, &label(icon::EYE_SLASH, "Anteprima live")).click();
-        harness.run();
+        settle(&mut harness);
         assert!(harness.state().state.live_preview);
     }
 
@@ -897,12 +1064,12 @@ mod tests {
             }],
         );
         layout::open(&mut harness.state_mut().dock, Tab::Problems);
-        harness.run();
+        settle(&mut harness);
 
         harness
             .get_by_label("proprietà sconosciuta 'colour'")
             .click();
-        harness.run();
+        settle(&mut harness);
         let state = &harness.state().state;
         assert_eq!(state.diagnostics.counts().errors, 1);
         assert_eq!(state.workspace.active_document().unwrap().doc.path(), card);
@@ -913,11 +1080,11 @@ mod tests {
         let dir = project_dir();
         let mut harness = with_project(&dir);
         harness.get_by_role(Role::MultilineTextInput).click();
-        harness.run();
+        settle(&mut harness);
         harness
             .get_by_role(Role::MultilineTextInput)
             .type_text("// nota");
-        harness.run();
+        settle(&mut harness);
         let path = {
             let open = harness.state().state.workspace.active_document().unwrap();
             assert!(open.doc.is_dirty());
@@ -926,7 +1093,7 @@ mod tests {
         };
 
         harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
-        harness.run();
+        settle(&mut harness);
         assert!(
             !harness
                 .state()
@@ -956,16 +1123,16 @@ mod tests {
         };
         let original = text(&harness);
         harness.get_by_role(Role::MultilineTextInput).click();
-        harness.run();
+        settle(&mut harness);
 
         harness.key_press(Key::Tab);
-        harness.run();
+        settle(&mut harness);
         let indented = text(&harness);
         assert_eq!(indented.len(), original.len() + 4);
         assert!(!indented.contains('\t'));
 
         harness.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
-        harness.run();
+        settle(&mut harness);
         assert_eq!(text(&harness).len(), original.len());
     }
 
@@ -992,13 +1159,13 @@ mod tests {
         harness.get_by_label("Modifiche non salvate");
 
         harness.get_by_label("Annulla").click();
-        harness.run();
+        settle(&mut harness);
         assert!(harness.state().state.unsaved.is_none());
         assert!(harness.state().state.workspace.document(&path).is_some());
 
         send(&mut harness, Command::CloseDocument(path.clone()));
         harness.get_by_label("Non salvare").click();
-        harness.run();
+        settle(&mut harness);
         assert!(harness.state().state.workspace.document(&path).is_none());
         assert_ne!(fs::read_to_string(&path).unwrap(), "modificato");
     }
@@ -1026,9 +1193,125 @@ mod tests {
                 position: LineCol::new(hits[0].line, hits[0].column),
             },
         );
-        harness.run();
+        settle(&mut harness);
         let open = harness.state().state.workspace.active_document().unwrap();
         assert!(open.doc.path().ends_with("ui/card.slint"));
         assert_eq!(open.editor.cursor, 10, "cursor moved to the match");
+    }
+
+    #[test]
+    fn opening_a_project_renders_the_live_preview() {
+        let dir = project_dir();
+        let harness = with_project(&dir);
+        let preview = &harness.state().state.preview;
+        let image = preview
+            .image
+            .as_ref()
+            .expect("the entry point is previewed");
+        assert_eq!(image.component, "Main");
+        assert!(image.logical_size.x > 0.0 && image.logical_size.y > 0.0);
+        assert!(preview.failure.is_none());
+    }
+
+    #[test]
+    fn typing_an_error_shows_it_over_the_preview_without_saving() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        let path = {
+            let open = harness
+                .state_mut()
+                .state
+                .workspace
+                .active_document_mut()
+                .unwrap();
+            open.doc
+                .set_text("export component Main inherits Window { colour: red; }".into());
+            open.doc.path().to_path_buf()
+        };
+        send(&mut harness, Command::DocumentEdited(path.clone()));
+        let failure = harness
+            .state()
+            .state
+            .preview
+            .failure
+            .clone()
+            .expect("compile error shown");
+        assert!(
+            failure
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("colour"))
+        );
+        assert!(
+            harness.state().state.preview.image.is_some(),
+            "the last good image is kept"
+        );
+        harness.get_by_label_contains("colour");
+
+        // Fixing the buffer (still unsaved) updates the preview again.
+        harness
+            .state_mut()
+            .state
+            .workspace
+            .active_document_mut()
+            .unwrap()
+            .doc
+            .set_text(
+                "export component Main inherits Window { width: 50px; height: 20px; }".into(),
+            );
+        send(&mut harness, Command::DocumentEdited(path.clone()));
+        let preview = &harness.state().state.preview;
+        assert!(preview.failure.is_none());
+        assert_eq!(
+            preview.image.as_ref().unwrap().logical_size,
+            egui::vec2(50.0, 20.0)
+        );
+        assert_ne!(
+            fs::read_to_string(&path).unwrap(),
+            "export component Main inherits Window { width: 50px; height: 20px; }"
+        );
+    }
+
+    #[test]
+    fn external_changes_reload_unmodified_documents() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        let path = harness
+            .state()
+            .state
+            .workspace
+            .active_document()
+            .unwrap()
+            .doc
+            .path()
+            .to_path_buf();
+        let changed = "export component Main inherits Window { width: 30px; height: 30px; }\n";
+        fs::write(&path, changed).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while harness
+            .state()
+            .state
+            .workspace
+            .document(&path)
+            .unwrap()
+            .doc
+            .text()
+            != changed
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "external change not picked up"
+            );
+            harness.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        settle(&mut harness);
+        let state = &harness.state().state;
+        assert!(!state.workspace.document(&path).unwrap().doc.is_dirty());
+        assert_eq!(
+            state.preview.image.as_ref().unwrap().logical_size,
+            egui::vec2(30.0, 30.0)
+        );
     }
 }

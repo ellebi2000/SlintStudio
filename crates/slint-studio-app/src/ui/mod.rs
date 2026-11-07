@@ -1,6 +1,7 @@
 //! UI building blocks of the IDE shell. Each module renders one region.
 
 pub mod about;
+pub mod canvas;
 pub mod dialogs;
 pub mod editor;
 pub mod explorer;

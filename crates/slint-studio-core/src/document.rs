@@ -83,6 +83,20 @@ impl Document {
         Ok(())
     }
 
+    /// Re-reads the file after an external change. The document stays
+    /// clean; returns whether the content changed.
+    pub fn reload(&mut self) -> Result<bool, OpenError> {
+        let fresh = Self::open(&self.path)?;
+        if fresh.text == self.text {
+            return Ok(false);
+        }
+        self.text = fresh.text;
+        self.line_index = fresh.line_index;
+        self.version = self.version.wrapping_add(1);
+        self.dirty = false;
+        Ok(true)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -190,6 +204,25 @@ mod tests {
         doc.save().unwrap();
         assert!(!doc.is_dirty());
         assert_eq!(fs::read_to_string(&path).unwrap(), "export component B {}");
+    }
+
+    #[test]
+    fn reload_picks_up_external_changes_and_stays_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.slint");
+        fs::write(&path, "A {}").unwrap();
+        let mut doc = Document::open(&path).unwrap();
+        let version = doc.version();
+
+        assert!(!doc.reload().unwrap(), "unchanged file");
+        assert_eq!(doc.version(), version);
+
+        fs::write(&path, "B {}\n").unwrap();
+        assert!(doc.reload().unwrap());
+        assert_eq!(doc.text(), "B {}\n");
+        assert!(doc.version() > version);
+        assert!(!doc.is_dirty());
+        assert_eq!(doc.line_index().line_count(), 2);
     }
 
     #[test]
