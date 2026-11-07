@@ -6,11 +6,24 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+# Downloading and installing the managed Slint tools (pulls in an HTTP client).
+install = ["dep:directories", "dep:flate2", "dep:sha2", "dep:tar", "dep:ureq", "dep:zip"]
+
 [dependencies]
 thiserror.workspace = true
 
+directories = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+
 [dev-dependencies]
 tempfile.workspace = true
+# Run the installer tests with `cargo test -p slint-studio-core`.
+slint-studio-core = { path = ".", features = ["install"] }
 
 [lints]
 workspace = true

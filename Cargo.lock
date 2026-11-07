@@ -5271,33 +5271,44 @@ dependencies = [
 [[package]]
 name = "slint-studio-compiler"
 version = "0.1.0"
+dependencies = [
+ "i-slint-compiler",
+ "nix",
+ "serde",
+ "serde_json",
+ "slint-studio-core",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
 
 [[package]]
 name = "slint-studio-core"
 version = "0.1.0"
 dependencies = [
+ "directories",
+ "flate2",
+ "sha2",
+ "slint-studio-core",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "ureq",
+ "zip",
 ]
 
 [[package]]
 name = "slint-studio-lsp"
 version = "0.1.0"
 dependencies = [
- "directories",
- "flate2",
  "lsp-types",
  "serde",
  "serde_json",
- "sha2",
  "slint-studio-core",
- "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "ureq",
  "url",
- "zip",
 ]
 
 [[package]]

@@ -45,6 +45,11 @@ slint-interpreter = { version = "=1.18.1", default-features = false, features = 
 image = { version = "0.25", default-features = false }
 notify = "8"
 
+# Build and run: `.slint` checks with the Slint compiler (same version as the
+# interpreter, so it adds no compile time) and stopping process groups on Unix.
+i-slint-compiler = { version = "=1.18.1", default-features = false }
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+
 # Native dialogs
 rfd = "0.18"
 

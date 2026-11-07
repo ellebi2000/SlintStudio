@@ -84,7 +84,7 @@ impl fmt::Display for Location {
 }
 
 /// A single problem reported to the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub source: DiagnosticSource,

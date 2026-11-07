@@ -7,6 +7,8 @@
 pub mod diagnostics;
 pub mod document;
 pub mod edit;
+#[cfg(feature = "install")]
+pub mod install;
 pub mod log;
 pub mod outline;
 pub mod palette;
@@ -14,6 +16,7 @@ pub mod project;
 pub mod properties;
 pub mod recent;
 pub mod syntax;
+pub mod terminal;
 pub mod text;
 pub mod view_mode;
 
@@ -24,6 +27,7 @@ pub use outline::{Binding, ElementNode, Outline};
 pub use palette::{ComponentCategory, PaletteItem};
 pub use project::{FileNode, FileTree, SearchHit, SearchResults};
 pub use recent::RecentProjects;
+pub use terminal::{AnsiColor, AnsiStyle, Terminal, TerminalLine, TerminalSpan, TerminalStream};
 pub use text::{LineCol, LineIndex, PositionEncoding};
 pub use view_mode::ViewMode;
 
