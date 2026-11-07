@@ -1,0 +1,33 @@
+[package]
+name = "slint-studio-app"
+description = "Slint Studio: an IDE for the Slint UI toolkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "slint-studio"
+path = "src/main.rs"
+
+[dependencies]
+slint-studio-core.workspace = true
+
+anyhow.workspace = true
+chrono.workspace = true
+# wgpu (default) plus glow as a fallback for machines without Vulkan/EGL.
+eframe = { workspace = true, features = ["glow"] }
+egui.workspace = true
+egui_dock.workspace = true
+egui_extras.workspace = true
+egui-phosphor.workspace = true
+fontdb.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-log.workspace = true
+
+[dev-dependencies]
+egui_kittest = { workspace = true, features = ["eframe"] }
+
+[lints]
+workspace = true
