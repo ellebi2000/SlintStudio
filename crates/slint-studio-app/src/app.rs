@@ -941,6 +941,35 @@ mod tests {
     }
 
     #[test]
+    fn tab_indents_with_spaces_and_shift_tab_unindents() {
+        let dir = project_dir();
+        let mut harness = with_project(&dir);
+        let text = |h: &Harness<'_, StudioApp>| {
+            h.state()
+                .state
+                .workspace
+                .active_document()
+                .unwrap()
+                .doc
+                .text()
+                .to_owned()
+        };
+        let original = text(&harness);
+        harness.get_by_role(Role::MultilineTextInput).click();
+        harness.run();
+
+        harness.key_press(Key::Tab);
+        harness.run();
+        let indented = text(&harness);
+        assert_eq!(indented.len(), original.len() + 4);
+        assert!(!indented.contains('\t'));
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+        harness.run();
+        assert_eq!(text(&harness).len(), original.len());
+    }
+
+    #[test]
     fn closing_a_modified_document_asks_for_confirmation() {
         let dir = project_dir();
         let mut harness = with_project(&dir);

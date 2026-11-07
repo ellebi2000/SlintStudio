@@ -414,7 +414,8 @@ fn handle_keys(
             KeyAction::TriggerCompletion
         } else if i.consume_key(Modifiers::NONE, Key::F12) {
             KeyAction::GoToDefinition
-        } else if i.consume_key(Modifiers::NONE, Key::Tab) {
+        } else if !i.modifiers.shift && i.consume_key(Modifiers::NONE, Key::Tab) {
+            // Shift+Tab is left to egui, which removes one indentation level.
             KeyAction::Indent
         } else if i.consume_key(Modifiers::NONE, Key::Enter) {
             KeyAction::Newline
