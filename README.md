@@ -135,7 +135,20 @@ On macOS `Ctrl` means `Cmd` (except for `Ctrl+Space`).
 ## Requirements
 
 - **Rust ≥ 1.95** (tested with 1.97). Install it from <https://rustup.rs>.
-- **Linux**: the X11/Wayland and OpenGL runtime libraries, and those used by the
+- **Linux, to build**: a C compiler, `pkg-config` and the fontconfig development
+  files (Slint uses fontconfig to find fonts). The same packages are needed to build
+  any Rust + Slint application, including the ones you run from the IDE.
+
+  | Distribution | Command |
+  |--------------|---------|
+  | Ubuntu / Debian | `sudo apt-get install -y build-essential pkg-config libfontconfig-dev` |
+  | Fedora | `sudo dnf install -y gcc pkgconf-pkg-config fontconfig-devel` |
+  | Arch Linux | `sudo pacman -S --needed base-devel fontconfig` |
+  | openSUSE | `sudo zypper install -y gcc pkg-config fontconfig-devel` |
+
+  Without them the build stops with ``The system library `fontconfig` required by crate
+  `yeslogic-fontconfig-sys` was not found``.
+- **Linux, to run**: the X11/Wayland and OpenGL runtime libraries, and those used by the
   prebuilt `slint-lsp`; a desktop system already has them. On minimal Ubuntu/Debian:
 
   ```bash
