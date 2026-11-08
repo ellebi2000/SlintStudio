@@ -340,7 +340,12 @@ impl DiagnosticStore {
     }
 }
 
+/// The per-user list of recent projects. UI tests open many temporary
+/// projects: they must never touch the real list.
 fn recent_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     ProjectDirs::from(
         app_dirs::QUALIFIER,
         app_dirs::ORGANIZATION,
@@ -413,6 +418,13 @@ mod tests {
         ws.close_document(&zeta);
         assert_eq!(ws.active, None);
         assert!(ws.open_document(&root.join("missing.slint")).is_err());
+    }
+
+    #[test]
+    fn tests_never_use_the_real_recent_projects_file() {
+        assert_eq!(recent_file(), None);
+        let workspace = Workspace::new();
+        assert!(workspace.recent.paths().is_empty());
     }
 
     #[test]
