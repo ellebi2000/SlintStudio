@@ -79,7 +79,7 @@ fn watermark(ui: &mut Ui, state: &AppState) {
     let hint = if state.workspace.project.is_some() {
         "Apri un file dall'albero del progetto"
     } else {
-        "Apri una cartella progetto: File › Apri cartella… (Ctrl+O)"
+        "Nuovo progetto (Ctrl+Shift+N) o Apri cartella (Ctrl+O) dal menu File"
     };
     let center = rect.center();
     painter.text(

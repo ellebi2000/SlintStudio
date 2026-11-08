@@ -8,6 +8,7 @@ pub mod explorer;
 pub mod highlight;
 pub mod inspector;
 pub mod menu_bar;
+pub mod new_project;
 pub mod output;
 pub mod status_bar;
 pub mod tabs;

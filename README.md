@@ -55,6 +55,16 @@ which phase will bring them.
 
 ## Features
 
+- **New project** (*File › Nuovo progetto…*, `Ctrl+Shift+N`): choose a template,
+  a name and a folder, and the project opens right away:
+  - *Applicazione Rust + Slint* — a Cargo application laid out like the official Slint
+    Rust template: `Cargo.toml` (Slint 1.18.1), `build.rs` compiling
+    `ui/app-window.slint` with `slint-build`, `src/main.rs` with a callback wired to
+    the UI, `.gitignore`;
+  - *Solo Slint* (Slint only) — just `ui/app-window.slint`, run with `slint-viewer`.
+
+  Existing non-empty folders are never overwritten; for Rust projects the Cargo
+  package name is derived from the project name (e.g. `La mia app` → `la-mia-app`).
 - **Project**: open a folder (native dialog, command-line argument or *Recenti* —
   Recent), file tree with filter, text search across all project files. The main file
   (`main.slint`, `app-window.slint`, …) opens automatically.
@@ -119,6 +129,7 @@ which phase will bring them.
 
 | Shortcut | Action |
 |----------|--------|
+| `Ctrl+Shift+N` | New project |
 | `Ctrl+O` | Open project folder |
 | `Ctrl+S` / `Ctrl+Shift+S` | Save / Save all |
 | `Ctrl+W` | Close the active file |

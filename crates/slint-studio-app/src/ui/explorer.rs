@@ -175,10 +175,17 @@ fn no_project(ui: &mut Ui, state: &mut AppState) {
             ui,
             icon::FOLDER_OPEN,
             "Nessun progetto aperto",
-            "Apri una cartella che contiene file .slint per esplorarne i file.",
+            "Crea un nuovo progetto o apri una cartella che contiene file .slint.",
         );
         ui.add_space(6.0);
         ui.vertical_centered(|ui| {
+            if ui
+                .button(with_icon(icon::FOLDER_PLUS, "Nuovo progetto…"))
+                .on_hover_text("Ctrl+Shift+N")
+                .clicked()
+            {
+                commands.push(Command::NewProject);
+            }
             if ui
                 .button(with_icon(icon::FOLDER_OPEN, "Apri cartella…"))
                 .on_hover_text("Ctrl+O")

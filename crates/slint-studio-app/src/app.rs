@@ -30,6 +30,7 @@ use crate::theme::{self, Palette};
 use crate::ui;
 use crate::ui::editor::{self, CompletionEntry, CompletionPopup};
 use crate::ui::explorer::ExplorerState;
+use crate::ui::new_project::NewProjectForm;
 use crate::watcher::{FileWatcher, is_slint};
 use crate::workspace::{DiagnosticStore, Project, Workspace};
 
@@ -63,6 +64,8 @@ pub struct AppState {
     pub show_about: bool,
     /// Action waiting for the "unsaved changes" dialog.
     pub unsaved: Option<GuardedAction>,
+    /// The "Nuovo progetto" dialog, while open.
+    pub new_project: Option<NewProjectForm>,
     pub preview: PreviewManager,
     pub designer: DesignerState,
     /// How the open project is built and run.
@@ -93,6 +96,7 @@ impl AppState {
             lsp_status: LspStatus::Idle,
             show_about: false,
             unsaved: None,
+            new_project: None,
             preview,
             designer: DesignerState::default(),
             project_kind: ProjectKind::Unsupported,
@@ -180,6 +184,10 @@ impl StudioApp {
             (
                 KeyboardShortcut::new(command_shift, Key::S),
                 Command::SaveAll,
+            ),
+            (
+                KeyboardShortcut::new(command_shift, Key::N),
+                Command::NewProject,
             ),
             (
                 KeyboardShortcut::new(command_shift, Key::F),
@@ -278,6 +286,23 @@ impl StudioApp {
             Command::OpenSlintDocs => ctx.open_url(egui::OpenUrl::new_tab(SLINT_DOCS_URL)),
             Command::Quit => self.guard(ctx, GuardedAction::Quit),
 
+            Command::NewProject => {
+                self.state.new_project = Some(NewProjectForm::new(&self.new_project_location()));
+            }
+            Command::BrowseNewProjectLocation => {
+                if let Some(form) = &mut self.state.new_project {
+                    let folder = rfd::FileDialog::new()
+                        .set_title("Cartella in cui creare il progetto")
+                        .set_directory(form.location.trim())
+                        .pick_folder();
+                    if let Some(folder) = folder {
+                        form.location = folder.display().to_string();
+                        form.error = None;
+                    }
+                }
+            }
+            Command::CreateProject => self.create_project(ctx),
+            Command::CancelNewProject => self.state.new_project = None,
             Command::OpenFolderDialog => {
                 let folder = rfd::FileDialog::new()
                     .set_title("Apri cartella progetto")
@@ -442,6 +467,43 @@ impl StudioApp {
     }
 
     // --- Project & documents ------------------------------------------------
+
+    /// Where new projects go by default: next to the most recent project,
+    /// else in the home folder.
+    fn new_project_location(&self) -> PathBuf {
+        self.state
+            .workspace
+            .recent
+            .paths()
+            .iter()
+            .filter_map(|p| p.parent())
+            .find(|p| p.is_dir())
+            .map(Path::to_path_buf)
+            .or_else(|| directories::UserDirs::new().map(|d| d.home_dir().to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn create_project(&mut self, ctx: &egui::Context) {
+        let Some(form) = &mut self.state.new_project else {
+            return;
+        };
+        let parent = PathBuf::from(form.location.trim());
+        match slint_studio_core::template::create(&parent, &form.name, form.template) {
+            Ok(dir) => {
+                info!(
+                    "Progetto creato: {} ({})",
+                    dir.display(),
+                    form.template.label()
+                );
+                self.state.new_project = None;
+                self.guard(ctx, GuardedAction::OpenProject(dir));
+            }
+            Err(err) => {
+                error!("Impossibile creare il progetto: {err}");
+                form.error = Some(err.to_string());
+            }
+        }
+    }
 
     fn open_project(&mut self, path: &Path) {
         let project = match Project::open(path) {
@@ -1232,6 +1294,7 @@ impl eframe::App for StudioApp {
         });
 
         ui::about::show(&ctx, &mut self.state);
+        ui::new_project::show(&ctx, &mut self.state);
         ui::dialogs::unsaved_changes(&ctx, &mut self.state);
 
         self.run_commands(&ctx);
@@ -1396,6 +1459,80 @@ mod tests {
 
     fn terminal_text(harness: &Harness<'_, StudioApp>) -> String {
         harness.state().state.runner.terminal.plain_text()
+    }
+
+    /// Opens the "Nuovo progetto" dialog with Ctrl+Shift+N and fills it in.
+    fn fill_new_project(harness: &mut Harness<'_, StudioApp>, parent: &Path, name: &str) {
+        harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::N);
+        settle(harness);
+        let form = harness.state_mut().state.new_project.as_mut().unwrap();
+        form.location = parent.display().to_string();
+        form.name = name.to_owned();
+        settle(harness);
+    }
+
+    #[test]
+    fn new_project_creates_and_opens_a_rust_project() {
+        let parent = tempfile::tempdir().unwrap();
+        let mut harness = harness();
+        button(&harness, &label(icon::FOLDER_PLUS, "Nuovo progetto…"));
+        fill_new_project(&mut harness, parent.path(), "La mia app");
+        harness.get_by_label("Nome del pacchetto Cargo: la-mia-app");
+        button(&harness, &label(icon::CHECK, "Crea")).click();
+        settle(&mut harness);
+
+        let state = &harness.state().state;
+        assert!(state.new_project.is_none(), "the dialog closes");
+        let project = state.workspace.project.as_ref().expect("project opened");
+        let root = parent.path().canonicalize().unwrap().join("La mia app");
+        assert_eq!(project.root, root);
+        assert_eq!(
+            state.project_kind,
+            ProjectKind::Cargo {
+                manifest: root.join("Cargo.toml")
+            }
+        );
+        assert!(root.join("src/main.rs").is_file());
+        let active = state.workspace.active_document().unwrap();
+        assert_eq!(active.doc.path(), root.join("ui/app-window.slint"));
+        let preview = harness.state().state.preview.image.as_ref();
+        assert!(preview.is_some(), "the new project is previewed");
+    }
+
+    #[test]
+    fn new_project_slint_only_and_validation() {
+        let parent = tempfile::tempdir().unwrap();
+        fs::create_dir_all(parent.path().join("occupata")).unwrap();
+        fs::write(parent.path().join("occupata/file.txt"), "x").unwrap();
+        let mut harness = harness();
+        fill_new_project(&mut harness, parent.path(), "occupata");
+        let create = label(icon::CHECK, "Crea");
+        assert!(is_disabled(&harness, &create), "folder not empty");
+        harness.get_by_label_contains("esiste già e non è vuota");
+
+        harness.state_mut().state.new_project.as_mut().unwrap().name = "a/b".into();
+        settle(&mut harness);
+        assert!(is_disabled(&harness, &create));
+        harness.get_by_label("il nome non può contenere «/»");
+
+        harness
+            .get_by_role_and_label(Role::RadioButton, "Solo Slint")
+            .click();
+        harness.state_mut().state.new_project.as_mut().unwrap().name = "bozza".into();
+        settle(&mut harness);
+        button(&harness, &create).click();
+        settle(&mut harness);
+        let state = &harness.state().state;
+        assert_eq!(state.project_kind, ProjectKind::Slint);
+        assert!(parent.path().join("bozza/ui/app-window.slint").is_file());
+        assert!(!parent.path().join("bozza/Cargo.toml").exists());
+
+        // Annulla closes the dialog without creating anything.
+        fill_new_project(&mut harness, parent.path(), "mai-creato");
+        button(&harness, "Annulla").click();
+        settle(&mut harness);
+        assert!(harness.state().state.new_project.is_none());
+        assert!(!parent.path().join("mai-creato").exists());
     }
 
     #[test]

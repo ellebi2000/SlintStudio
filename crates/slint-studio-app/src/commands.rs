@@ -25,6 +25,13 @@ pub enum Command {
     Quit,
 
     // Project
+    /// Shows the "Nuovo progetto" dialog.
+    NewProject,
+    /// Picks the parent folder in the "Nuovo progetto" dialog.
+    BrowseNewProjectLocation,
+    /// Creates the project described by the dialog and opens it.
+    CreateProject,
+    CancelNewProject,
     OpenFolderDialog,
     OpenProject(PathBuf),
     CloseProject,

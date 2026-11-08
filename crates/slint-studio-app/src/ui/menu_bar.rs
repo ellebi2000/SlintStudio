@@ -55,6 +55,15 @@ fn file_menu(ui: &mut Ui, state: &mut AppState) {
         ui,
         state,
         true,
+        Some(icon::FOLDER_PLUS),
+        "Nuovo progetto…",
+        Some("Ctrl+Shift+N"),
+        Command::NewProject,
+    );
+    item(
+        ui,
+        state,
+        true,
         Some(icon::FOLDER_OPEN),
         "Apri cartella…",
         Some("Ctrl+O"),
@@ -240,6 +249,15 @@ fn view_menu(ui: &mut Ui, state: &mut AppState, dock: &DockState<Tab>) {
 
 fn project_menu(ui: &mut Ui, state: &mut AppState) {
     let has_project = state.workspace.project.is_some();
+    item(
+        ui,
+        state,
+        true,
+        Some(icon::FOLDER_PLUS),
+        "Nuovo progetto…",
+        Some("Ctrl+Shift+N"),
+        Command::NewProject,
+    );
     item(
         ui,
         state,

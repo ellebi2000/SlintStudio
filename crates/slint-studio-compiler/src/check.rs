@@ -244,6 +244,17 @@ export component Main inherits Window {
     }
 
     #[test]
+    fn new_project_templates_compile() {
+        use slint_studio_core::template::{self, ProjectTemplate};
+        for kind in ProjectTemplate::ALL {
+            let parent = tempfile::tempdir().unwrap();
+            let dir = template::create(parent.path(), "Prova d'esempio è", kind).unwrap();
+            let main = dir.join(template::MAIN_FILE);
+            assert_eq!(check_file(&main, DEFAULT_STYLE), Vec::new(), "{kind:?}");
+        }
+    }
+
+    #[test]
     fn warnings_do_not_fail_the_check() {
         let dir = tempfile::tempdir().unwrap();
         let main = write(
